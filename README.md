@@ -11,6 +11,8 @@ This project adheres to the DINOv3 license. DINOv3 is released under a commercia
 ## Dataset
 
 This model is designed to be trained on datasets with the COCO format.
+### Image Size Requirements
+Important: The Vision Transformer (ViT) architecture, which forms the backbone of this model, processes images by dividing them into fixed-size patches.[1] The patch size for the DINOv3 ViT models is 16x16 pixels.[2] Consequently, the height and width of the input images must be a multiple of 16. If the image dimensions do not meet this requirement, the training process will fail.
 
 ## Usage
 

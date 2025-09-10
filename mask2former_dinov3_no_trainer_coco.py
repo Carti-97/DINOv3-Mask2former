@@ -60,14 +60,44 @@ from transformers.utils.versions import require_version
 
 import torch.nn as nn
 from typing import List, Dict
-
-# Import complete DINOv3-Mask2Former model
-from models.mask2former_dinov3_smallplus import create_mask2former_dinov3_model
+import importlib.util
+import sys
+import os
 
 logger = logging.getLogger(__name__)
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.56.0.dev0")
+
+
+def load_model_from_config(model_path: str):
+    """
+    Dynamically load model creation function from the specified Python file.
+    
+    Args:
+        model_path: Path to the Python model file (e.g., "models/mask2former_dinov3_vitsmallplus.py")
+        
+    Returns:
+        create_mask2former_dinov3_model function from the specified module
+    """
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model file not found: {model_path}")
+    
+    # Extract module name from file path
+    module_name = os.path.splitext(os.path.basename(model_path))[0]
+    
+    # Load module dynamically
+    spec = importlib.util.spec_from_file_location(module_name, model_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    
+    # Get the model creation function
+    if hasattr(module, 'create_mask2former_dinov3_model'):
+        logger.info(f"Successfully loaded model from: {model_path}")
+        return module.create_mask2former_dinov3_model
+    else:
+        raise AttributeError(f"Model file {model_path} does not contain 'create_mask2former_dinov3_model' function")
 
 require_version("datasets>=2.0.0", "To fix: pip install -r examples/pytorch/instance-segmentation/requirements.txt")
 
@@ -538,8 +568,62 @@ def handle_repository_creation(accelerator: Accelerator, args: argparse.Namespac
     return repo_id
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train DINOv3-Mask2Former model")
+    
+    # Config file option
+    parser.add_argument("--config", type=str, help="Path to JSON config file with all parameters")
+    
+    # Individual parameters (can override config file)
+    parser.add_argument("--model", type=str, help="Path to model configuration file")
+    parser.add_argument("--dataset_name", type=str, help="Dataset directory or HF Hub name")
+    parser.add_argument("--output_dir", type=str, help="Output directory for results")
+    parser.add_argument("--image_height", type=int, default=1024, help="Input image height")
+    parser.add_argument("--image_width", type=int, default=1024, help="Input image width")
+    parser.add_argument("--do_reduce_labels", action="store_true", help="Reduce labels by removing background")
+    parser.add_argument("--num_train_epochs", type=int, default=50, help="Number of training epochs")
+    parser.add_argument("--learning_rate", type=float, default=1e-6, help="Learning rate")
+    parser.add_argument("--lr_scheduler_type", type=str, default="polynomial", help="Learning rate scheduler")
+    parser.add_argument("--per_device_train_batch_size", type=int, default=2, help="Training batch size per device")
+    parser.add_argument("--per_device_eval_batch_size", type=int, default=2, help="Evaluation batch size per device")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=4, help="Gradient accumulation steps")
+    parser.add_argument("--dataloader_num_workers", type=int, default=4, help="Number of dataloader workers")
+    parser.add_argument("--checkpointing_steps", type=str, default="epoch", help="Checkpointing frequency")
+    parser.add_argument("--push_to_hub", action="store_true", help="Push model to Hugging Face Hub")
+    parser.add_argument("--hub_token", type=str, help="Hugging Face Hub token")
+    parser.add_argument("--hub_model_id", type=str, help="Hugging Face Hub model ID")
+    parser.add_argument("--cache_dir", type=str, help="Directory to cache downloaded models")
+    parser.add_argument("--trust_remote_code", action="store_true", help="Trust remote code")
+    parser.add_argument("--seed", type=int, help="Random seed")
+    
+    args = parser.parse_args()
+    
+    # Load JSON config if provided and merge with command line args
+    if args.config:
+        with open(args.config, 'r') as f:
+            config = json.load(f)
+            
+        # Set defaults from config file (command line args take precedence)
+        for key, value in config.items():
+            if not hasattr(args, key) or getattr(args, key) is None:
+                setattr(args, key, value)
+    
+    # Validate required arguments
+    if not args.model:
+        raise ValueError("--model parameter is required (either via command line or config file)")
+    if not args.dataset_name:
+        raise ValueError("--dataset_name parameter is required (either via command line or config file)")
+    if not args.output_dir:
+        raise ValueError("--output_dir parameter is required (either via command line or config file)")
+    
+    return args
+
+
 def main():
     args = parse_args()
+    
+    # Load model creation function from config
+    create_mask2former_dinov3_model = load_model_from_config(args.model)
 
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.

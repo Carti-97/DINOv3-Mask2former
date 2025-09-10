@@ -20,10 +20,60 @@ Important: The Vision Transformer (ViT) architecture, which forms the backbone o
 
 ## Usage
 
-To train the model, you can use the following command as an example:
+This project supports dynamic model loading through configuration files. You can choose between DINOv3-Small+ and DINOv3-Large models by specifying different model files in the configuration.
 
+### Method 1: Using JSON Configuration File (Recommended)
+
+Train with DINOv3-Small+ backbone:
 ```bash
-accelerate launch mask2former_dinov3_smallplus_no_trainer_coco.py --config mask2former-dinov3_smallplus_1024_train_args.json
+accelerate launch mask2former_dinov3_no_trainer_coco.py --config mask2former-dinov3_smallplus_1024_train_args.json
 ```
 
-In this example, `mask2former_dinov3_smallplus_no_trainer_coco.py` is the training script, and `mask2former-dinov3_smallplus_1024_train_args.json` is the configuration file containing the training arguments. You will need to adapt these files to your specific dataset and training setup.
+Train with DINOv3-Large backbone:
+```bash
+accelerate launch mask2former_dinov3_no_trainer_coco.py --config mask2former-dinov3_large_1024_train_args.json
+```
+
+### Method 2: Using Command Line Arguments
+
+You can also specify parameters directly via command line:
+```bash
+accelerate launch mask2former_dinov3_no_trainer_coco.py \
+    --model models/mask2former_dinov3_vitsmallplus.py \
+    --dataset_name /path/to/your/coco/dataset \
+    --output_dir ./output/dinov3-smallplus-experiment \
+    --image_height 1024 \
+    --image_width 1024 \
+    --num_train_epochs 50 \
+    --learning_rate 1e-6
+```
+
+For DINOv3-Large:
+```bash
+accelerate launch mask2former_dinov3_no_trainer_coco.py \
+    --model models/mask2former_dinov3_vitlarge.py \
+    --dataset_name /path/to/your/coco/dataset \
+    --output_dir ./output/dinov3-large-experiment \
+    --image_height 1024 \
+    --image_width 1024 \
+    --num_train_epochs 50 \
+    --learning_rate 5e-5
+```
+
+### Method 3: Hybrid Approach
+
+You can use a configuration file as a base and override specific parameters:
+```bash
+accelerate launch mask2former_dinov3_no_trainer_coco.py \
+    --config mask2former-dinov3_smallplus_1024_train_args.json \
+    --learning_rate 2e-6 \
+    --output_dir ./custom_output_dir
+```
+
+### Configuration Files
+
+The project includes pre-configured JSON files:
+- `mask2former-dinov3_smallplus_1024_train_args.json`: Configuration for DINOv3-Small+ model
+- `mask2former-dinov3_large_1024_train_args.json`: Configuration for DINOv3-Large model
+
+You will need to adapt the `dataset_name` parameter in these files to point to your specific COCO dataset directory.

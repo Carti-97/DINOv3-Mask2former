@@ -1,0 +1,17 @@
+{
+    "model_name_or_path": "facebook/mask2former-swin-large-coco-instance",
+    "dataset_name": "/home/chbae/ImageModel_Research/dataset/ON_diverse_1024",
+    "output_dir": "dinov3-large-mask2former-instance-ON-diverse-1024",
+    "do_reduce_labels": true,
+    "image_height": 1024,
+    "image_width": 1024,
+    "num_train_epochs": 50,
+    "learning_rate": 5e-5,
+    "lr_scheduler_type": "polynomial",
+    "per_device_train_batch_size": 1,
+    "per_device_eval_batch_size": 2,
+    "gradient_accumulation_steps": 8,
+    "dataloader_num_workers": 8,
+    "checkpointing_steps": "epoch",
+    "push_to_hub": false
+}

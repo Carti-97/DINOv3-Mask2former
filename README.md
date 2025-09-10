@@ -6,9 +6,11 @@ The training methodology is based on the instance segmentation examples provided
 
 ## License
 
-This project utilizes components with their own licenses. The overall license for this repository is MIT, but please be aware of the following:
-Project Code: The code written for this project is released under the MIT License.
-DINOv3 Backbone: This project replaces the original backbone with models from DINOv3. The DINOv3 models and their associated code are subject to the DINOv3 license. DINOv3 is released under a commercial license, and its training code and pre-trained backbones are open-sourced to foster innovation in the computer vision community. For detailed terms, please refer to the official DINOv3 license agreement.
+License
+This project is licensed under the Apache License 2.0. You can find the full license text in the LICENSE file.
+Please note that this project utilizes several components, each with its own licensing terms:
+Project Codebase: The project's codebase is a derivative of the Hugging Face Transformers library's examples and is therefore also licensed under Apache 2.0. A NOTICE file with attribution details is included in this repository.
+DINOv3 Backbone: The DINOv3 models used as the backbone are subject to the DINOv3 license, the terms of which can be found in the DINOV3_LICENSE.md file. For more details, please refer to the official DINOv3 license agreement.
 
 ## Dataset
 

@@ -1,0 +1,8 @@
+(DINOv3-Mask2former - e.g., Mask2Former with DINOv3)
+Copyright [2025] [Chan Ho Bae]
+
+This software is based on the instance segmentation examples from the
+Hugging Face Transformers library.
+
+This product includes software developed by
+The HuggingFace Inc. team (Copyright 2025).

@@ -6,7 +6,9 @@ The training methodology is based on the instance segmentation examples provided
 
 ## License
 
-This project adheres to the DINOv3 license. DINOv3 is released under a commercial license, and its training code and pre-trained backbones are open-sourced to foster innovation in the computer vision community. For detailed terms, please refer to the official DINOv3 license agreement.
+This project utilizes components with their own licenses. The overall license for this repository is MIT, but please be aware of the following:
+Project Code: The code written for this project is released under the MIT License.
+DINOv3 Backbone: This project replaces the original backbone with models from DINOv3. The DINOv3 models and their associated code are subject to the DINOv3 license. DINOv3 is released under a commercial license, and its training code and pre-trained backbones are open-sourced to foster innovation in the computer vision community. For detailed terms, please refer to the official DINOv3 license agreement.
 
 ## Dataset
 

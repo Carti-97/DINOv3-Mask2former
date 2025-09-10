@@ -60,7 +60,9 @@ from transformers.utils.versions import require_version
 
 import torch.nn as nn
 from typing import List, Dict
-from transformers import AutoModel
+
+# Import complete DINOv3-Mask2Former model
+from models.mask2former_dinov3_smallplus import create_mask2former_dinov3_model
 
 logger = logging.getLogger(__name__)
 
@@ -568,7 +570,7 @@ def main():
         
         # Initialize image processor first
         image_processor = AutoImageProcessor.from_pretrained(
-            args.model_name_or_path,
+            "facebook/mask2former-swin-small-coco-instance",
             do_resize=True,
             size={"height": args.image_height, "width": args.image_width},
             do_reduce_labels=args.do_reduce_labels,
@@ -622,68 +624,13 @@ def main():
         
         id2label = {v: k for k, v in label2id.items()}
         
-        # Create model with the label mappings
-        # ================== START: MODIFICATION FOR DINOv3 BACKBONE ==================
-        
-        # 1. 여기에 DINOv3 커스텀 백본과 어댑터 클래스를 붙여넣습니다.
-        
-        
-        class Adapter(nn.Module):
-            def __init__(self, in_channels: int, out_channels: List[int]):
-                super().__init__()
-                self.projections = nn.ModuleList([
-                    nn.Conv2d(in_channels, out_ch, kernel_size=1) for out_ch in out_channels
-                ])
-            def forward(self, features: List[torch.Tensor]) -> List[torch.Tensor]:
-                return [self.projections[i](feat) for i, feat in enumerate(features)]
-
-        class DinoV3WithAdapterBackbone(nn.Module):
-            def __init__(self, model_name: str, out_channels: List[int]):
-                super().__init__()
-                self.model = AutoModel.from_pretrained(model_name)
-                self.adapter = Adapter(self.model.config.hidden_size, out_channels)
-                self.out_features = [f"stage_{i}" for i in range(len(out_channels))]
-                self._out_feature_channels = {name: ch for name, ch in zip(self.out_features, out_channels)}
-                self._out_feature_strides = {"stage_0": 8, "stage_1": 16, "stage_2": 32, "stage_3": 32}
-                self.layers_to_extract = [2, 5, 8, 11]
-            def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
-                outputs = self.model(pixel_values=x, output_hidden_states=True, return_dict=True)
-                hidden_states = outputs.hidden_states
-                batch_size, _, height, width = x.shape
-                patch_size = self.model.config.patch_size
-                patch_height, patch_width = height // patch_size, width // patch_size
-                extracted_features = []
-                for layer_idx in self.layers_to_extract:
-                    layer_output = hidden_states[layer_idx + 1]
-                    feature_map = layer_output[:, 1:, :].permute(0, 2, 1).reshape(
-                        batch_size, self.model.config.hidden_size, patch_height, patch_width)
-                    extracted_features.append(feature_map)
-                adapted_features = self.adapter(extracted_features)
-                return {name: feat for name, feat in zip(self.out_features, adapted_features)}
-
-        # 2. DINOv3 모델 정보와 Mask2Former 헤드가 기대하는 채널 정의
-        dinov3_backbone_name = "facebook/dinov3-vits16plus-pretrain-lvd1689m"
-        expected_channels = [96, 192, 384, 768] # Swin-Small 헤드 기준
-
-        # 3. 커스텀 백본 생성
-        custom_backbone = DinoV3WithAdapterBackbone(dinov3_backbone_name, expected_channels)
-        
-        # 4. Mask2Former 모델 로드 (헤드 부분만 사용)
-        model = AutoModelForUniversalSegmentation.from_pretrained(
-            args.model_name_or_path,
+        # Create complete DINOv3-Mask2Former model
+        model = create_mask2former_dinov3_model(
             label2id=label2id,
             id2label=id2label,
-            ignore_mismatched_sizes=True,
-            token=args.hub_token,
+            freeze_backbone=True,
+            hub_token=args.hub_token,
         )
-        
-        # 5. 백본 교체 및 동결(Freeze)
-        model.model.backbone = custom_backbone
-        for param in model.model.backbone.model.parameters():
-            param.requires_grad = False
-            
-        logger.info("Successfully replaced and froze the DINOv3 backbone.")
-        # =================== END: MODIFICATION FOR DINOv3 BACKBONE ===================
         
     else:
         # Original HuggingFace dataset loading code
@@ -698,17 +645,16 @@ def main():
         
         id2label = {v: k for k, v in label2id.items()}
         
-        # Load pretrained model and image processor
-        model = AutoModelForUniversalSegmentation.from_pretrained(
-            args.model_name_or_path,
+        # Create complete DINOv3-Mask2Former model
+        model = create_mask2former_dinov3_model(
             label2id=label2id,
             id2label=id2label,
-            ignore_mismatched_sizes=True,
-            token=args.hub_token,
+            freeze_backbone=True,
+            hub_token=args.hub_token,
         )
         
         image_processor = AutoImageProcessor.from_pretrained(
-            args.model_name_or_path,
+            "facebook/mask2former-swin-small-coco-instance",
             do_resize=True,
             size={"height": args.image_height, "width": args.image_width},
             do_reduce_labels=args.do_reduce_labels,
@@ -734,6 +680,9 @@ def main():
         
         train_dataset = dataset["train"]
         val_dataset = dataset["validation"]
+
+    # DINOv3 backbone is already integrated in the model - no additional setup needed!
+    logger.info("DINOv3-Mask2Former model ready to use.")
 
     # ------------------------------------------------------------------------------------------------
     # Create dataloaders

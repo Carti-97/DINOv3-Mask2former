@@ -1,0 +1,9 @@
+torch
+huggingface
+transformers
+accelerate
+Albumentations
+datasets
+torchmetrics
+pycocotools
+-U "huggingface_hub[cli]"

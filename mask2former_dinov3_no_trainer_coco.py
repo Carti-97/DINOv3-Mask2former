@@ -60,12 +60,44 @@ from transformers.utils.versions import require_version
 
 import torch.nn as nn
 from typing import List, Dict
-from transformers import AutoModel
+import importlib.util
+import sys
+import os
 
 logger = logging.getLogger(__name__)
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.56.0.dev0")
+
+
+def load_model_from_config(model_path: str):
+    """
+    Dynamically load model creation function from the specified Python file.
+    
+    Args:
+        model_path: Path to the Python model file (e.g., "models/mask2former_dinov3_vitsmallplus.py")
+        
+    Returns:
+        create_mask2former_dinov3_model function from the specified module
+    """
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model file not found: {model_path}")
+    
+    # Extract module name from file path
+    module_name = os.path.splitext(os.path.basename(model_path))[0]
+    
+    # Load module dynamically
+    spec = importlib.util.spec_from_file_location(module_name, model_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    
+    # Get the model creation function
+    if hasattr(module, 'create_mask2former_dinov3_model'):
+        logger.info(f"Successfully loaded model from: {model_path}")
+        return module.create_mask2former_dinov3_model
+    else:
+        raise AttributeError(f"Model file {model_path} does not contain 'create_mask2former_dinov3_model' function")
 
 require_version("datasets>=2.0.0", "To fix: pip install -r examples/pytorch/instance-segmentation/requirements.txt")
 
@@ -536,8 +568,186 @@ def handle_repository_creation(accelerator: Accelerator, args: argparse.Namespac
     return repo_id
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Finetune a transformers model for instance segmentation task")
+
+    # JSON config file option (at the beginning)
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to JSON config file containing training arguments"
+    )
+
+    # 임시로 config 인자만 먼저 파싱합니다.
+    temp_args, _ = parser.parse_known_args()
+
+    # 기본값을 담을 딕셔너리
+    defaults = {}
+    if temp_args.config:
+        with open(temp_args.config, 'r') as f:
+            defaults = json.load(f)
+
+    parser.add_argument(
+        "--model",
+        type=str,
+        help="Path to a pretrained model or model identifier from huggingface.co/models.",
+        default="models/mask2former_dinov3_vitsmallplus.py",
+    )
+    parser.add_argument(
+        "--dataset_name",
+        type=str,
+        help="Name of the dataset on the hub or path to local COCO dataset.",
+        
+    )
+    parser.add_argument(
+        "--trust_remote_code",
+        action="store_true",
+        help=(
+            "Whether to trust the execution of code from datasets/models defined on the Hub."
+            " This option should only be set to `True` for repositories you trust and in which you have read the"
+            " code, as it will execute code present on the Hub on your local machine."
+        ),
+    )
+    parser.add_argument(
+        "--image_height",
+        type=int,
+        default=384,
+        help="The height of the images to feed the model.",
+    )
+    parser.add_argument(
+        "--image_width",
+        type=int,
+        default=384,
+        help="The width of the images to feed the model.",
+    )
+    parser.add_argument(
+        "--do_reduce_labels",
+        action="store_true",
+        help="Whether to reduce the number of labels by removing the background class.",
+    )
+    parser.add_argument(
+        "--cache_dir",
+        type=str,
+        help="Path to a folder in which the model and dataset will be cached.",
+    )
+    parser.add_argument(
+        "--per_device_train_batch_size",
+        type=int,
+        default=8,
+        help="Batch size (per device) for the training dataloader.",
+    )
+    parser.add_argument(
+        "--per_device_eval_batch_size",
+        type=int,
+        default=8,
+        help="Batch size (per device) for the evaluation dataloader.",
+    )
+    parser.add_argument(
+        "--dataloader_num_workers",
+        type=int,
+        default=4,
+        help="Number of workers to use for the dataloaders.",
+    )
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=5e-5,
+        help="Initial learning rate (after the potential warmup period) to use.",
+    )
+    parser.add_argument(
+        "--adam_beta1",
+        type=float,
+        default=0.9,
+        help="Beta1 for AdamW optimizer",
+    )
+    parser.add_argument(
+        "--adam_beta2",
+        type=float,
+        default=0.999,
+        help="Beta2 for AdamW optimizer",
+    )
+    parser.add_argument(
+        "--adam_epsilon",
+        type=float,
+        default=1e-8,
+        help="Epsilon for AdamW optimizer",
+    )
+    parser.add_argument("--num_train_epochs", type=int, default=3, help="Total number of training epochs to perform.")
+    parser.add_argument(
+        "--max_train_steps",
+        type=int,
+        default=None,
+        help="Total number of training steps to perform. If provided, overrides num_train_epochs.",
+    )
+    parser.add_argument(
+        "--gradient_accumulation_steps",
+        type=int,
+        default=1,
+        help="Number of updates steps to accumulate before performing a backward/update pass.",
+    )
+    parser.add_argument(
+        "--lr_scheduler_type",
+        type=SchedulerType,
+        default="linear",
+        help="The scheduler type to use.",
+        choices=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"],
+    )
+    parser.add_argument(
+        "--num_warmup_steps", type=int, default=0, help="Number of steps for the warmup in the lr scheduler."
+    )
+    parser.add_argument("--output_dir", type=str, default=None, help="Where to store the final model.")
+    parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
+    parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
+    parser.add_argument(
+        "--hub_model_id", type=str, help="The name of the repository to keep in sync with the local `output_dir`."
+    )
+    parser.add_argument("--hub_token", type=str, help="The token to use to push to the Model Hub.")
+    parser.add_argument(
+        "--checkpointing_steps",
+        type=str,
+        default=None,
+        help="Whether the various states should be saved at the end of every n steps, or 'epoch' for each epoch.",
+    )
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        type=str,
+        default=None,
+        help="If the training should continue from a checkpoint folder.",
+    )
+    
+    parser.set_defaults(**defaults)
+
+    args = parser.parse_args()
+    
+    # Load JSON config if provided and merge with command line args
+    if args.config:
+        with open(args.config, 'r') as f:
+            config = json.load(f)
+            
+        # Set defaults from config file (command line args take precedence)
+        for key, value in config.items():
+            if not hasattr(args, key) or getattr(args, key) is None:
+                setattr(args, key, value)
+    
+    # Validate required arguments
+    if not args.model:
+        raise ValueError("--model parameter is required (either via command line or config file)")
+    if not args.dataset_name:
+        raise ValueError("--dataset_name parameter is required (either via command line or config file)")
+    if not args.output_dir:
+        raise ValueError("--output_dir parameter is required (either via command line or config file)")
+    if args.output_dir is not None:
+        os.makedirs(args.output_dir, exist_ok=True)
+
+    return args
+
+
 def main():
     args = parse_args()
+    
+    # Load model creation function from config
+    create_mask2former_dinov3_model = load_model_from_config(args.model)
 
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
@@ -568,7 +778,7 @@ def main():
         
         # Initialize image processor first
         image_processor = AutoImageProcessor.from_pretrained(
-            args.model_name_or_path,
+            "facebook/mask2former-swin-small-coco-instance",
             do_resize=True,
             size={"height": args.image_height, "width": args.image_width},
             do_reduce_labels=args.do_reduce_labels,
@@ -622,68 +832,13 @@ def main():
         
         id2label = {v: k for k, v in label2id.items()}
         
-        # Create model with the label mappings
-        # ================== START: MODIFICATION FOR DINOv3 BACKBONE ==================
-        
-        # 1. 여기에 DINOv3 커스텀 백본과 어댑터 클래스를 붙여넣습니다.
-        
-        
-        class Adapter(nn.Module):
-            def __init__(self, in_channels: int, out_channels: List[int]):
-                super().__init__()
-                self.projections = nn.ModuleList([
-                    nn.Conv2d(in_channels, out_ch, kernel_size=1) for out_ch in out_channels
-                ])
-            def forward(self, features: List[torch.Tensor]) -> List[torch.Tensor]:
-                return [self.projections[i](feat) for i, feat in enumerate(features)]
-
-        class DinoV3WithAdapterBackbone(nn.Module):
-            def __init__(self, model_name: str, out_channels: List[int]):
-                super().__init__()
-                self.model = AutoModel.from_pretrained(model_name)
-                self.adapter = Adapter(self.model.config.hidden_size, out_channels)
-                self.out_features = [f"stage_{i}" for i in range(len(out_channels))]
-                self._out_feature_channels = {name: ch for name, ch in zip(self.out_features, out_channels)}
-                self._out_feature_strides = {"stage_0": 8, "stage_1": 16, "stage_2": 32, "stage_3": 32}
-                self.layers_to_extract = [2, 5, 8, 11]
-            def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
-                outputs = self.model(pixel_values=x, output_hidden_states=True, return_dict=True)
-                hidden_states = outputs.hidden_states
-                batch_size, _, height, width = x.shape
-                patch_size = self.model.config.patch_size
-                patch_height, patch_width = height // patch_size, width // patch_size
-                extracted_features = []
-                for layer_idx in self.layers_to_extract:
-                    layer_output = hidden_states[layer_idx + 1]
-                    feature_map = layer_output[:, 1:, :].permute(0, 2, 1).reshape(
-                        batch_size, self.model.config.hidden_size, patch_height, patch_width)
-                    extracted_features.append(feature_map)
-                adapted_features = self.adapter(extracted_features)
-                return {name: feat for name, feat in zip(self.out_features, adapted_features)}
-
-        # 2. DINOv3 모델 정보와 Mask2Former 헤드가 기대하는 채널 정의
-        dinov3_backbone_name = "facebook/dinov3-vits16plus-pretrain-lvd1689m"
-        expected_channels = [96, 192, 384, 768] # Swin-Small 헤드 기준
-
-        # 3. 커스텀 백본 생성
-        custom_backbone = DinoV3WithAdapterBackbone(dinov3_backbone_name, expected_channels)
-        
-        # 4. Mask2Former 모델 로드 (헤드 부분만 사용)
-        model = AutoModelForUniversalSegmentation.from_pretrained(
-            args.model_name_or_path,
+        # Create complete DINOv3-Mask2Former model
+        model = create_mask2former_dinov3_model(
             label2id=label2id,
             id2label=id2label,
-            ignore_mismatched_sizes=True,
-            token=args.hub_token,
+            freeze_backbone=True,
+            hub_token=args.hub_token,
         )
-        
-        # 5. 백본 교체 및 동결(Freeze)
-        model.model.backbone = custom_backbone
-        for param in model.model.backbone.model.parameters():
-            param.requires_grad = False
-            
-        logger.info("Successfully replaced and froze the DINOv3 backbone.")
-        # =================== END: MODIFICATION FOR DINOv3 BACKBONE ===================
         
     else:
         # Original HuggingFace dataset loading code
@@ -698,17 +853,16 @@ def main():
         
         id2label = {v: k for k, v in label2id.items()}
         
-        # Load pretrained model and image processor
-        model = AutoModelForUniversalSegmentation.from_pretrained(
-            args.model_name_or_path,
+        # Create complete DINOv3-Mask2Former model
+        model = create_mask2former_dinov3_model(
             label2id=label2id,
             id2label=id2label,
-            ignore_mismatched_sizes=True,
-            token=args.hub_token,
+            freeze_backbone=True,
+            hub_token=args.hub_token,
         )
         
         image_processor = AutoImageProcessor.from_pretrained(
-            args.model_name_or_path,
+            "facebook/mask2former-swin-small-coco-instance",
             do_resize=True,
             size={"height": args.image_height, "width": args.image_width},
             do_reduce_labels=args.do_reduce_labels,
@@ -734,6 +888,9 @@ def main():
         
         train_dataset = dataset["train"]
         val_dataset = dataset["validation"]
+
+    # DINOv3 backbone is already integrated in the model - no additional setup needed!
+    logger.info("DINOv3-Mask2Former model ready to use.")
 
     # ------------------------------------------------------------------------------------------------
     # Create dataloaders

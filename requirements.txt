@@ -6,4 +6,4 @@ Albumentations
 datasets
 torchmetrics
 pycocotools
--U "huggingface_hub[cli]"
+huggingface_hub[cli]

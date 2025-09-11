@@ -6,11 +6,15 @@ The training methodology is based on the instance segmentation examples provided
 
 ## License
 
-License
-This project is licensed under the Apache License 2.0. You can find the full license text in the LICENSE file.
-Please note that this project utilizes several components, each with its own licensing terms:
-Project Codebase: The project's codebase is a derivative of the Hugging Face Transformers library's examples and is therefore also licensed under Apache 2.0. A NOTICE file with attribution details is included in this repository.
-DINOv3 Backbone: The DINOv3 models used as the backbone are subject to the DINOv3 license, the terms of which can be found in the DINOV3_LICENSE.md file. For more details, please refer to the official DINOv3 license agreement.
+This project incorporates code and models from different sources, each with its own license. Please review the following details carefully.
+
+*   **Project Codebase (Apache 2.0)**
+    *   The main codebase of this project is licensed under the Apache 2.0 License. You can find the full license text in the [`LICENSE`](./LICENSE) file.
+    *   This code is a derivative of examples from the Hugging Face Transformers library and includes necessary attributions in the [`NOTICE`](./NOTICE) file.
+
+*   **DINOv3 Backbone**
+    *   The DINOv3 models used as a backbone in this project are subject to a separate license. 
+    *   The terms can be found in the [`DINOV3_LICENSE.md`](./DINOV3_LICENSE.md) file. For complete details, please refer to the official DINOv3 repository and its licensing terms.
 
 ## Dataset
 

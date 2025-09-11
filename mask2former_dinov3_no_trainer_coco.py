@@ -569,33 +569,155 @@ def handle_repository_creation(accelerator: Accelerator, args: argparse.Namespac
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train DINOv3-Mask2Former model")
+    parser = argparse.ArgumentParser(description="Finetune a transformers model for instance segmentation task")
+
+    # JSON config file option (at the beginning)
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to JSON config file containing training arguments"
+    )
+
+    # 임시로 config 인자만 먼저 파싱합니다.
+    temp_args, _ = parser.parse_known_args()
+
+    # 기본값을 담을 딕셔너리
+    defaults = {}
+    if temp_args.config:
+        with open(temp_args.config, 'r') as f:
+            defaults = json.load(f)
+
+    parser.add_argument(
+        "--model",
+        type=str,
+        help="Path to a pretrained model or model identifier from huggingface.co/models.",
+        default="models/mask2former_dinov3_vitsmallplus.py",
+    )
+    parser.add_argument(
+        "--dataset_name",
+        type=str,
+        help="Name of the dataset on the hub or path to local COCO dataset.",
+        
+    )
+    parser.add_argument(
+        "--trust_remote_code",
+        action="store_true",
+        help=(
+            "Whether to trust the execution of code from datasets/models defined on the Hub."
+            " This option should only be set to `True` for repositories you trust and in which you have read the"
+            " code, as it will execute code present on the Hub on your local machine."
+        ),
+    )
+    parser.add_argument(
+        "--image_height",
+        type=int,
+        default=384,
+        help="The height of the images to feed the model.",
+    )
+    parser.add_argument(
+        "--image_width",
+        type=int,
+        default=384,
+        help="The width of the images to feed the model.",
+    )
+    parser.add_argument(
+        "--do_reduce_labels",
+        action="store_true",
+        help="Whether to reduce the number of labels by removing the background class.",
+    )
+    parser.add_argument(
+        "--cache_dir",
+        type=str,
+        help="Path to a folder in which the model and dataset will be cached.",
+    )
+    parser.add_argument(
+        "--per_device_train_batch_size",
+        type=int,
+        default=8,
+        help="Batch size (per device) for the training dataloader.",
+    )
+    parser.add_argument(
+        "--per_device_eval_batch_size",
+        type=int,
+        default=8,
+        help="Batch size (per device) for the evaluation dataloader.",
+    )
+    parser.add_argument(
+        "--dataloader_num_workers",
+        type=int,
+        default=4,
+        help="Number of workers to use for the dataloaders.",
+    )
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=5e-5,
+        help="Initial learning rate (after the potential warmup period) to use.",
+    )
+    parser.add_argument(
+        "--adam_beta1",
+        type=float,
+        default=0.9,
+        help="Beta1 for AdamW optimizer",
+    )
+    parser.add_argument(
+        "--adam_beta2",
+        type=float,
+        default=0.999,
+        help="Beta2 for AdamW optimizer",
+    )
+    parser.add_argument(
+        "--adam_epsilon",
+        type=float,
+        default=1e-8,
+        help="Epsilon for AdamW optimizer",
+    )
+    parser.add_argument("--num_train_epochs", type=int, default=3, help="Total number of training epochs to perform.")
+    parser.add_argument(
+        "--max_train_steps",
+        type=int,
+        default=None,
+        help="Total number of training steps to perform. If provided, overrides num_train_epochs.",
+    )
+    parser.add_argument(
+        "--gradient_accumulation_steps",
+        type=int,
+        default=1,
+        help="Number of updates steps to accumulate before performing a backward/update pass.",
+    )
+    parser.add_argument(
+        "--lr_scheduler_type",
+        type=SchedulerType,
+        default="linear",
+        help="The scheduler type to use.",
+        choices=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"],
+    )
+    parser.add_argument(
+        "--num_warmup_steps", type=int, default=0, help="Number of steps for the warmup in the lr scheduler."
+    )
+    parser.add_argument("--output_dir", type=str, default=None, help="Where to store the final model.")
+    parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
+    parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
+    parser.add_argument(
+        "--hub_model_id", type=str, help="The name of the repository to keep in sync with the local `output_dir`."
+    )
+    parser.add_argument("--hub_token", type=str, help="The token to use to push to the Model Hub.")
+    parser.add_argument(
+        "--checkpointing_steps",
+        type=str,
+        default=None,
+        help="Whether the various states should be saved at the end of every n steps, or 'epoch' for each epoch.",
+    )
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        type=str,
+        default=None,
+        help="If the training should continue from a checkpoint folder.",
+    )
     
-    # Config file option
-    parser.add_argument("--config", type=str, help="Path to JSON config file with all parameters")
-    
-    # Individual parameters (can override config file)
-    parser.add_argument("--model", type=str, help="Path to model configuration file")
-    parser.add_argument("--dataset_name", type=str, help="Dataset directory or HF Hub name")
-    parser.add_argument("--output_dir", type=str, help="Output directory for results")
-    parser.add_argument("--image_height", type=int, default=1024, help="Input image height")
-    parser.add_argument("--image_width", type=int, default=1024, help="Input image width")
-    parser.add_argument("--do_reduce_labels", action="store_true", help="Reduce labels by removing background")
-    parser.add_argument("--num_train_epochs", type=int, default=50, help="Number of training epochs")
-    parser.add_argument("--learning_rate", type=float, default=1e-6, help="Learning rate")
-    parser.add_argument("--lr_scheduler_type", type=str, default="polynomial", help="Learning rate scheduler")
-    parser.add_argument("--per_device_train_batch_size", type=int, default=2, help="Training batch size per device")
-    parser.add_argument("--per_device_eval_batch_size", type=int, default=2, help="Evaluation batch size per device")
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=4, help="Gradient accumulation steps")
-    parser.add_argument("--dataloader_num_workers", type=int, default=4, help="Number of dataloader workers")
-    parser.add_argument("--checkpointing_steps", type=str, default="epoch", help="Checkpointing frequency")
-    parser.add_argument("--push_to_hub", action="store_true", help="Push model to Hugging Face Hub")
-    parser.add_argument("--hub_token", type=str, help="Hugging Face Hub token")
-    parser.add_argument("--hub_model_id", type=str, help="Hugging Face Hub model ID")
-    parser.add_argument("--cache_dir", type=str, help="Directory to cache downloaded models")
-    parser.add_argument("--trust_remote_code", action="store_true", help="Trust remote code")
-    parser.add_argument("--seed", type=int, help="Random seed")
-    
+    parser.set_defaults(**defaults)
+
     args = parser.parse_args()
     
     # Load JSON config if provided and merge with command line args
@@ -615,7 +737,9 @@ def parse_args():
         raise ValueError("--dataset_name parameter is required (either via command line or config file)")
     if not args.output_dir:
         raise ValueError("--output_dir parameter is required (either via command line or config file)")
-    
+    if args.output_dir is not None:
+        os.makedirs(args.output_dir, exist_ok=True)
+
     return args
 
 

@@ -72,13 +72,13 @@ check_min_version("4.56.0.dev0")
 
 def load_model_from_config(model_path: str):
     """
-    Dynamically load model creation function from the specified Python file.
+    Dynamically load model creation function and mask2former model name from the specified Python file.
     
     Args:
         model_path: Path to the Python model file (e.g., "models/mask2former_dinov3_vitsmallplus.py")
         
     Returns:
-        create_mask2former_dinov3_model function from the specified module
+        Tuple of (create_mask2former_dinov3_model function, mask2former_model_name string)
     """
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model file not found: {model_path}")
@@ -93,11 +93,31 @@ def load_model_from_config(model_path: str):
     spec.loader.exec_module(module)
     
     # Get the model creation function
-    if hasattr(module, 'create_mask2former_dinov3_model'):
-        logger.info(f"Successfully loaded model from: {model_path}")
-        return module.create_mask2former_dinov3_model
-    else:
+    if not hasattr(module, 'create_mask2former_dinov3_model'):
         raise AttributeError(f"Model file {model_path} does not contain 'create_mask2former_dinov3_model' function")
+    
+    # Extract mask2former_model_name from the function source by executing it partially
+    # This is a bit hacky but works - we'll look at the function's source code
+    import inspect
+    func_source = inspect.getsource(module.create_mask2former_dinov3_model)
+    
+    # Extract mask2former_model_name from function source
+    mask2former_model_name = None
+    for line in func_source.split('\n'):
+        line = line.strip()
+        if line.startswith('mask2former_model_name') and '=' in line:
+            # Parse the line: mask2former_model_name = "facebook/mask2former-swin-small-coco-instance"
+            mask2former_model_name = line.split('=', 1)[1].strip().strip('"\'')
+            break
+    
+    if not mask2former_model_name:
+        logger.warning(f"Could not find mask2former_model_name in {model_path}, using default")
+        mask2former_model_name = "facebook/mask2former-swin-small-coco-instance"
+    
+    logger.info(f"Successfully loaded model from: {model_path}")
+    logger.info(f"  - Detected mask2former base model: {mask2former_model_name}")
+    
+    return module.create_mask2former_dinov3_model, mask2former_model_name
 
 require_version("datasets>=2.0.0", "To fix: pip install -r examples/pytorch/instance-segmentation/requirements.txt")
 
@@ -577,8 +597,9 @@ def parse_args():
 def main():
     args = parse_args()
     
-    # Load model creation function from config
-    create_mask2former_dinov3_model = load_model_from_config(args.model)
+    # Load model creation function and mask2former model name from config
+    create_mask2former_dinov3_model, image_processor_model = load_model_from_config(args.model)
+    logger.info(f"Using image processor: {image_processor_model}")
 
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
@@ -607,9 +628,9 @@ def main():
     if Path(args.dataset_name).is_dir():
         logger.info(f"Loading local COCO dataset from {args.dataset_name}")
         
-        # Initialize image processor first
+        # Initialize image processor using the model's mask2former_model_name
         image_processor = AutoImageProcessor.from_pretrained(
-            "facebook/mask2former-swin-small-coco-instance",
+            image_processor_model,
             do_resize=True,
             size={"height": args.image_height, "width": args.image_width},
             do_reduce_labels=args.do_reduce_labels,
@@ -692,8 +713,9 @@ def main():
             hub_token=args.hub_token,
         )
         
+        # Use image processor from model's mask2former_model_name
         image_processor = AutoImageProcessor.from_pretrained(
-            "facebook/mask2former-swin-small-coco-instance",
+            image_processor_model,
             do_resize=True,
             size={"height": args.image_height, "width": args.image_width},
             do_reduce_labels=args.do_reduce_labels,
@@ -800,6 +822,7 @@ def main():
     total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
     logger.info("***** Running training *****")
+    logger.info(f"  Image processor: {image_processor_model}")
     logger.info(f"  Num examples = {len(train_dataset)}")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
     logger.info(f"  Instantaneous batch size per device = {args.per_device_train_batch_size}")

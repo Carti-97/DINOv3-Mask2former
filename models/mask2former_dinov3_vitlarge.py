@@ -75,7 +75,7 @@ class DinoV3WithAdapterBackbone(nn.Module):
 def create_mask2former_dinov3_model(
     label2id: Dict[str, int],
     id2label: Dict[int, str],
-    dinov3_model_name: str = "facebook/dinov3-large",
+    dinov3_model_name: str = "facebook/dinov3-vitl16-pretrain-lvd1689m",
     expected_channels: List[int] = [192, 384, 768, 1536],  # Swin-Large head configuration
     freeze_backbone: bool = True,
     hub_token: str = None

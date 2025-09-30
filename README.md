@@ -99,35 +99,40 @@ You will need to adapt the `dataset_name` parameter in these files to point to y
 
 ### Checkpointing System
 
-The training script includes an enhanced checkpointing system controlled by the `checkpointing_steps` parameter:
+The `checkpointing_steps` parameter supports two modes:
 
-- **Automatic Saving**: At every specified number of steps (e.g., every 200 steps), the system automatically saves:
-  - Model checkpoint files
-  - Training state and optimizer states
-  - Training metrics and logs
-  
-- **Validation Process**: Each time a checkpoint is created, the system automatically runs validation on the validation dataset to evaluate model performance.
+#### Step-based Checkpointing
+```json
+{
+  "checkpointing_steps": "200"  // Save every 200 steps
+}
+```
 
-- **Configuration**: Set the checkpointing interval in your configuration file:
-  ```json
-  {
-    "checkpointing_steps": "200"
-  }
-  ```
+- Saves checkpoint every N steps
+- Runs validation at each checkpoint
+- Output: `step_{N}_state/` (for resuming), `step_{N}_model/` (for inference)
 
-- **Output Structure**: Checkpoints are saved in the following structure:
-  ```
-  output_dir/
-  ├── step_200_model/
-  │   ├── model files...
-  │   └── step_200_metrics.json
-  ├── step_400_model/
-  │   ├── model files...
-  │   └── step_400_metrics.json
-  └── ...
-  ```
+#### Epoch-based Checkpointing
+```json
+{
+  "checkpointing_steps": "epoch"  // Save every epoch
+}
+```
 
-This feature allows for:
-- **Resume Training**: Ability to resume training from any checkpoint
-- **Model Selection**: Easy comparison of model performance at different training stages
-- **Early Stopping**: Monitor validation metrics to prevent overfitting
+- Saves checkpoint at the end of each epoch
+- Uses existing end-of-epoch validation
+- Output: `checkpoint_epoch_{N}/` (for resuming), `epoch_{N}/` (for inference), `best_model/`
+
+#### Training Resumption
+
+```bash
+# Resume from step checkpoint
+accelerate launch mask2former_dinov3_no_trainer_coco.py \
+    --config your_config.json \
+    --resume_from_checkpoint output_dir/step_400_state
+
+# Resume from epoch checkpoint
+accelerate launch mask2former_dinov3_no_trainer_coco.py \
+    --config your_config.json \
+    --resume_from_checkpoint output_dir/checkpoint_epoch_5
+```

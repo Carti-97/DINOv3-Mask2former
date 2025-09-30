@@ -903,10 +903,51 @@ def main():
 
             if isinstance(checkpointing_steps, int):
                 if completed_steps % checkpointing_steps == 0 and accelerator.sync_gradients:
-                    output_dir = f"step_{completed_steps}"
                     if args.output_dir is not None:
-                        output_dir = os.path.join(args.output_dir, output_dir)
-                    accelerator.save_state(output_dir)
+                        # ================== FIX START ==================
+                        logger.info(f"***** Checkpointing at step {completed_steps} *****")
+
+                        # 1. 평가 실행을 위해 모델을 eval 모드로 전환
+                        model.eval()
+                        
+                        # 2. 현재 스텝의 성능 메트릭 계산
+                        metrics = evaluation_loop(model, image_processor, accelerator, valid_dataloader, id2label)
+                        logger.info(f"Metrics at step {completed_steps}: {metrics}")
+                        
+                        # 3. 다시 train 모드로 전환하여 학습 계속
+                        model.train()
+
+                        # 4. 학습 재개용 상태(state) 저장
+                        state_checkpoint_dir = os.path.join(args.output_dir, f"step_{completed_steps}_state")
+                        accelerator.save_state(state_checkpoint_dir)
+                        logger.info(f"Saved training state to {state_checkpoint_dir}")
+                        
+                        # 5. 추론용 모델(model) 및 메트릭 저장
+                        model_checkpoint_dir = os.path.join(args.output_dir, f"step_{completed_steps}_model")
+                        
+                        accelerator.wait_for_everyone()
+                        unwrapped_model = accelerator.unwrap_model(model)
+                        
+                        if accelerator.is_main_process:
+                            # 추론용 모델 저장
+                            os.makedirs(model_checkpoint_dir, exist_ok=True)
+                            unwrapped_model.save_pretrained(
+                                model_checkpoint_dir,
+                                is_main_process=accelerator.is_main_process,
+                                save_function=accelerator.save
+                            )
+                            image_processor.save_pretrained(model_checkpoint_dir)
+                            logger.info(f"Saved inference-ready model to {model_checkpoint_dir}")
+                            
+                            # 메트릭을 JSON 파일로 저장
+                            step_metrics = {
+                                f"step_{completed_steps}_{k}": v.item() if isinstance(v, torch.Tensor) and v.numel() == 1 else v.tolist() if isinstance(v, torch.Tensor) else v 
+                                for k, v in metrics.items()
+                            }
+                            with open(os.path.join(model_checkpoint_dir, f"step_{completed_steps}_metrics.json"), "w") as f:
+                                json.dump(step_metrics, f, indent=2)
+                            logger.info(f"Saved metrics to {model_checkpoint_dir}")
+                        # ================== FIX END ====================
 
                     if args.push_to_hub and epoch < args.num_train_epochs - 1:
                         accelerator.wait_for_everyone()

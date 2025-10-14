@@ -1,8 +1,15 @@
 # Mask2Former with DINOv3 Backbones
 
-> Last Updated: 2025.09.30
+> Last Updated: 2025.10.14
 
 ## Recent Updates
+
+### 2025.10.14
+- **Inference Script Added**: New `simple_inference.py` for easy model inference
+  - Single image and batch processing modes
+  - Recursive directory processing support
+  - Visual output with colored segmentation masks
+  - Adjustable confidence threshold
 
 ### 2025.09.30
 - **Enhanced Checkpointing System**: Improved `checkpointing_steps` functionality
@@ -94,6 +101,58 @@ The project includes pre-configured JSON files:
 - `mask2former-dinov3_large_1024_train_args.json`: Configuration for DINOv3-Large model
 
 You will need to adapt the `dataset_name` parameter in these files to point to your specific COCO dataset directory.
+
+## Inference
+
+The project now includes `simple_inference.py`, a user-friendly script for running inference with trained Mask2Former models.
+
+### Features
+- **Single Image Mode**: Process individual images
+- **Batch Mode**: Process entire directories of images
+- **Recursive Processing**: Option to process subdirectories
+- **Visual Results**: Automatically generates annotated images with colored masks and confidence scores
+- **Flexible Thresholding**: Adjustable detection confidence threshold
+
+### Usage Examples
+
+#### Process a Single Image
+```bash
+python simple_inference.py \
+    --model_path ./output/dinov3-smallplus-mask2former-1e4/step_1400_model \
+    --image_path /path/to/image.jpg \
+    --output result.jpg \
+    --threshold 0.5
+```
+
+#### Batch Process a Directory
+```bash
+python simple_inference.py \
+    --model_path ./output/dinov3-smallplus-mask2former-1e4/step_1400_model \
+    --input_dir /path/to/images/ \
+    --output_dir /path/to/results/ \
+    --threshold 0.5 \
+    --batch
+```
+
+#### Recursive Directory Processing
+```bash
+python simple_inference.py \
+    --model_path ./output/dinov3-smallplus-mask2former-1e4/step_1400_model \
+    --input_dir /path/to/images/ \
+    --output_dir /path/to/results/ \
+    --recursive \
+    --batch
+```
+
+### Parameters
+- `--model_path, -m`: Path to the trained model directory
+- `--image_path, -i`: Path to a single image (for single image mode)
+- `--input_dir, -d`: Input directory containing images (for batch mode)
+- `--output_dir, -od`: Output directory for results (for batch mode)
+- `--output, -o`: Output path for single image result
+- `--threshold, -t`: Detection confidence threshold (default: 0.5)
+- `--batch, -b`: Enable batch processing mode
+- `--recursive, -r`: Process subdirectories recursively
 
 ## Features
 

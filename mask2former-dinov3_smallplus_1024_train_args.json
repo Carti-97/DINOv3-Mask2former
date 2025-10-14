@@ -1,7 +1,7 @@
 {
     "model": "models/mask2former_dinov3_vitsmallplus.py",
     "dataset_name": "dataset/ON_diverse_1024",
-    "output_dir": "output/dinov3-smallplus-mask2former-1e4",
+    "output_dir": "output/dinov3-smallplus-mask2former-1e4-unfreeze",
     "do_reduce_labels": true,
     "image_height": 1024,
     "image_width": 1024,

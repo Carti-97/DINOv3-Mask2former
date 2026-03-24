@@ -119,6 +119,20 @@ def load_model_from_config(model_path: str):
     
     return module.create_mask2former_dinov3_model, mask2former_model_name
 
+def save_dinov3_backbone_config(save_dir: str, model_path: str):
+    """
+    Save DINOv3 backbone metadata alongside the model so it can be correctly
+    reconstructed during inference instead of falling back to Swin backbone.
+    """
+    config_path = os.path.join(save_dir, "dinov3_backbone_config.json")
+    backbone_config = {
+        "model_file": model_path,
+        "description": "DINOv3 custom backbone config - used to reconstruct the correct backbone at inference time"
+    }
+    with open(config_path, "w") as f:
+        json.dump(backbone_config, f, indent=2)
+
+
 require_version("datasets>=2.0.0", "To fix: pip install -r examples/pytorch/instance-segmentation/requirements.txt")
 
 
@@ -937,6 +951,7 @@ def main():
                                 save_function=accelerator.save
                             )
                             image_processor.save_pretrained(model_checkpoint_dir)
+                            save_dinov3_backbone_config(model_checkpoint_dir, args.model)
                             logger.info(f"Saved inference-ready model to {model_checkpoint_dir}")
                             
                             # 메트릭을 JSON 파일로 저장
@@ -1006,12 +1021,13 @@ def main():
             
             if accelerator.is_main_process:
                 image_processor.save_pretrained(epoch_output_dir)
-                
+                save_dinov3_backbone_config(epoch_output_dir, args.model)
+
                 # epoch 메트릭 저장
                 epoch_metrics = {f"epoch_{epoch}_{k}": v.item() if isinstance(v, torch.Tensor) and v.numel() == 1 else v.tolist() if isinstance(v, torch.Tensor) else v for k, v in metrics.items()}
                 with open(os.path.join(epoch_output_dir, f"epoch_{epoch}_metrics.json"), "w") as f:
                     json.dump(epoch_metrics, f, indent=2)
-                
+
                 logger.info(f"모델과 메트릭이 {epoch_output_dir}에 저장되었습니다.")
 
             # Best epoch 모델 저장
@@ -1027,7 +1043,8 @@ def main():
                 
                 if accelerator.is_main_process:
                     image_processor.save_pretrained(best_output_dir)
-                    
+                    save_dinov3_backbone_config(best_output_dir, args.model)
+
                     # Best 메트릭과 epoch 정보 저장
                     best_info = {
                         "best_epoch": best_epoch,
@@ -1112,6 +1129,7 @@ def main():
                 logger.info("훈련 완료! (Best epoch 정보 없음)")
 
             image_processor.save_pretrained(args.output_dir)
+            save_dinov3_backbone_config(args.output_dir, args.model)
 
             if args.push_to_hub:
                 api.upload_folder(

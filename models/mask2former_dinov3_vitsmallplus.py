@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 from typing import List, Dict
 from transformers import AutoModel, AutoModelForUniversalSegmentation
+from transformers.modeling_outputs import BackboneOutput
 import logging
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ class DinoV3WithAdapterBackbone(nn.Module):
         super().__init__()
         self.model = AutoModel.from_pretrained(model_name)
         self.adapter = Adapter(self.model.config.hidden_size, out_channels)
+        self.channels = list(out_channels)
         
         # Define output features for Mask2Former compatibility
         self.out_features = [f"stage_{i}" for i in range(len(out_channels))]
@@ -45,7 +47,7 @@ class DinoV3WithAdapterBackbone(nn.Module):
         # Layers to extract from DINOv3 (different depths for multi-scale features)
         self.layers_to_extract = [2, 5, 8, 11]
     
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> BackboneOutput:
         # Get DINOv3 outputs with all hidden states
         outputs = self.model(pixel_values=x, output_hidden_states=True, return_dict=True)
         hidden_states = outputs.hidden_states
@@ -55,21 +57,28 @@ class DinoV3WithAdapterBackbone(nn.Module):
         patch_size = self.model.config.patch_size
         patch_height, patch_width = height // patch_size, width // patch_size
         
+        # DINOv3 prepends a CLS token and optional register tokens before patch tokens.
+        prefix_tokens = 1 + getattr(self.model.config, "num_register_tokens", 0)
+
         # Extract features from different layers
         extracted_features = []
         for layer_idx in self.layers_to_extract:
-            layer_output = hidden_states[layer_idx + 1]  # Skip CLS token
+            layer_output = hidden_states[layer_idx + 1]
+            patch_tokens = layer_output[:, prefix_tokens:, :]
             # Reshape from (B, N, C) to (B, C, H, W)
-            feature_map = layer_output[:, 1:, :].permute(0, 2, 1).reshape(
+            feature_map = patch_tokens.permute(0, 2, 1).reshape(
                 batch_size, self.model.config.hidden_size, patch_height, patch_width
             )
             extracted_features.append(feature_map)
         
         # Apply adapter to convert channels
         adapted_features = self.adapter(extracted_features)
-        
-        # Return features with proper naming for Mask2Former
-        return {name: feat for name, feat in zip(self.out_features, adapted_features)}
+
+        return BackboneOutput(
+            feature_maps=tuple(adapted_features),
+            hidden_states=tuple(hidden_states),
+            attentions=outputs.attentions,
+        )
 
 
 def create_mask2former_dinov3_model(
@@ -115,12 +124,12 @@ def create_mask2former_dinov3_model(
     # 2. Create custom DINOv3 backbone with adapter
     custom_backbone = DinoV3WithAdapterBackbone(dinov3_model_name, expected_channels)
     
-    # 3. Replace the backbone
-    model.model.backbone = custom_backbone
+    # 3. Replace the encoder actually used by Mask2Former during training/inference.
+    model.model.pixel_level_module.encoder = custom_backbone
     
     # 4. Freeze DINOv3 weights if requested
     if freeze_backbone:
-        for param in model.model.backbone.model.parameters():
+        for param in model.model.pixel_level_module.encoder.model.parameters():
             param.requires_grad = False
         logger.info("DINOv3 backbone weights frozen.")
     else:
@@ -141,7 +150,7 @@ def get_model_info(model: AutoModelForUniversalSegmentation) -> Dict:
     Returns:
         Dictionary with model information
     """
-    backbone = model.model.backbone
+    backbone = model.model.pixel_level_module.encoder
     
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())

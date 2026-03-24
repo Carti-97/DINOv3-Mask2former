@@ -8,11 +8,15 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import argparse
 import os
+import json
+import importlib.util
+import sys
 
 from transformers import (
     AutoImageProcessor,
     AutoModelForUniversalSegmentation,
 )
+from safetensors.torch import load_file
 import glob
 
 # Class ID to name mapping
@@ -28,19 +32,71 @@ CLASS_NAMES = {
 }
 
 def load_model(model_path):
-    """Load model"""
+    """Load model with correct DINOv3 backbone reconstruction"""
     print(f"Loading model: {model_path}")
-    
+
     image_processor = AutoImageProcessor.from_pretrained(model_path, use_fast=True)
-    model = AutoModelForUniversalSegmentation.from_pretrained(model_path)
+
+    # Check if DINOv3 backbone config exists
+    dinov3_config_path = os.path.join(model_path, "dinov3_backbone_config.json")
+    if os.path.exists(dinov3_config_path):
+        print("Found dinov3_backbone_config.json - reconstructing DINOv3 backbone")
+        with open(dinov3_config_path, "r") as f:
+            dinov3_config = json.load(f)
+
+        # Load model creation function from the model file
+        model_file = dinov3_config["model_file"]
+        if not os.path.isabs(model_file):
+            # Resolve relative path from project root
+            project_root = os.path.dirname(os.path.abspath(__file__))
+            model_file = os.path.join(project_root, model_file)
+
+        module_name = os.path.splitext(os.path.basename(model_file))[0]
+        spec = importlib.util.spec_from_file_location(module_name, model_file)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+
+        # Read label mappings from saved config
+        config_path = os.path.join(model_path, "config.json")
+        with open(config_path, "r") as f:
+            model_config = json.load(f)
+
+        label2id = model_config.get("label2id", {})
+        id2label = model_config.get("id2label", {})
+
+        # Recreate model with correct DINOv3 backbone
+        model = module.create_mask2former_dinov3_model(
+            label2id=label2id,
+            id2label=id2label,
+            freeze_backbone=False,
+        )
+
+        # Load saved weights
+        weights_path = os.path.join(model_path, "model.safetensors")
+        if os.path.exists(weights_path):
+            state_dict = load_file(weights_path)
+            model.load_state_dict(state_dict, strict=False)
+            print("Loaded weights from model.safetensors")
+        else:
+            # Fallback to pytorch_model.bin
+            weights_path = os.path.join(model_path, "pytorch_model.bin")
+            if os.path.exists(weights_path):
+                state_dict = torch.load(weights_path, map_location="cpu")
+                model.load_state_dict(state_dict, strict=False)
+                print("Loaded weights from pytorch_model.bin")
+    else:
+        print("No dinov3_backbone_config.json found - using default HuggingFace loading")
+        model = AutoModelForUniversalSegmentation.from_pretrained(model_path)
+
     model.eval()
-    
+
     if torch.cuda.is_available():
         model = model.cuda()
         print("Using GPU")
     else:
         print("Using CPU")
-    
+
     return model, image_processor
 
 def inference_and_visualize(model, image_processor, image_path, save_path=None, threshold=0.5):

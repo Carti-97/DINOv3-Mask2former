@@ -1,8 +1,25 @@
 # Mask2Former with DINOv3 Backbones
 
-> Last Updated: 2025.10.14
+> Last Updated: 2026.08.20
 
 ## Recent Updates
+
+### 2026.08.20
+- **Bug fixes & fail-fast overhaul**
+  - `--resume_from_checkpoint` now correctly parses the checkpoint folder names this script creates (`step_{N}_state`, `checkpoint_epoch_{N}`); previously resuming crashed with a `ValueError`.
+  - Single-image inference mode is reachable again (batch mode was always triggered by a default `--input_dir`).
+  - The Mask2Former base model name is now read from a `MASK2FORMER_MODEL_NAME` constant in the model file instead of parsing Python source code; a missing constant is a hard error (no silent fallback to swin-small).
+  - Inference weight loading fails fast on missing weight files or mismatched keys (no more silent `strict=False`).
+  - Unknown keys in a `--config` JSON file now raise an error instead of being silently ignored.
+  - COCO annotation cache is invalidated when the annotation file changes, is built only once in distributed runs, and RLE segmentations are decoded correctly in cached runs.
+  - End-of-epoch validation now runs with the model in `eval()` mode (dropout was previously active during evaluation).
+  - Compatible with transformers v5 (removed the deleted `send_example_telemetry` API).
+- **New training options**: `--freeze_backbone/--no-freeze_backbone`, `--use_augmentation`, `--max_grad_norm`, `--logging_steps` (periodic loss/LR logging).
+- **Final evaluation uses the `test` split** when `dataset/<name>/test/_annotations.coco.json` exists (falls back to reporting the last validation metrics, clearly logged).
+- **Feature-pyramid model variants** (`models/*_pyramid.py`): ViTDet-style simple feature pyramid producing true multi-scale features (strides 4/8/16/32) instead of four stride-16 maps. Not weight-compatible with the plain variants.
+- **Model code deduplicated**: shared implementation in `models/dinov3_mask2former_base.py`; variant files only define constants.
+- **Class names at inference come from the checkpoint's `id2label`** instead of a hardcoded list.
+- `requirements.txt` cleaned up (removed the bogus `huggingface` package, added missing dependencies).
 
 ### 2025.10.14
 - **Inference Script Added**: New `simple_inference.py` for easy model inference
@@ -100,7 +117,34 @@ The project includes pre-configured JSON files:
 - `mask2former-dinov3_smallplus_1024_train_args.json`: Configuration for DINOv3-Small+ model
 - `mask2former-dinov3_large_1024_train_args.json`: Configuration for DINOv3-Large model
 
-You will need to adapt the `dataset_name` parameter in these files to point to your specific COCO dataset directory.
+You will need to adapt the `dataset_name` parameter in these files to point to your specific COCO dataset directory. Unknown keys in a config file raise an error, so typos are caught immediately.
+
+### Model Variants
+
+| Model file | Backbone | Head | Feature scales |
+|---|---|---|---|
+| `models/mask2former_dinov3_vitsmallplus.py` | DINOv3 ViT-S+/16 | Swin-Small config | 4 maps, all stride 16 |
+| `models/mask2former_dinov3_vitlarge.py` | DINOv3 ViT-L/16 | Swin-Large config | 4 maps, all stride 16 |
+| `models/mask2former_dinov3_vitsmallplus_pyramid.py` | DINOv3 ViT-S+/16 | Swin-Small config | strides 4/8/16/32 (ViTDet-style pyramid) |
+| `models/mask2former_dinov3_vitlarge_pyramid.py` | DINOv3 ViT-L/16 | Swin-Large config | strides 4/8/16/32 (ViTDet-style pyramid) |
+
+The `_pyramid` variants resample the tapped ViT features into a real multi-scale pyramid, matching what the Mask2Former pixel decoder was designed for. Checkpoints are **not** weight-compatible between plain and pyramid variants.
+
+### Additional Training Options
+
+- `--freeze_backbone` / `--no-freeze_backbone`: freeze or finetune the DINOv3 backbone (default: frozen). In a JSON config use `"freeze_backbone": false`.
+- `--use_augmentation`: enable training-time augmentations (horizontal flip + brightness/contrast). Do **not** enable flips when class labels depend on object position.
+- `--max_grad_norm`: gradient clipping max norm (disabled by default; the Mask2Former paper uses 0.01).
+- `--logging_steps`: log training loss and learning rate every N optimization steps (default: 50).
+
+Mixed precision is handled by Accelerate, e.g.:
+```bash
+accelerate launch --mixed_precision bf16 mask2former_dinov3_no_trainer_coco.py --config ...
+```
+
+### Final Evaluation
+
+If `<dataset>/test/_annotations.coco.json` exists, the final evaluation after training runs on the test split and results are stored with a `test_` prefix in `all_results.json`. Otherwise the last validation metrics are reported with a `valid_` prefix.
 
 ## Inference
 
@@ -113,7 +157,11 @@ The project now includes `simple_inference.py`, a user-friendly script for runni
 - **Visual Results**: Automatically generates annotated images with colored masks and confidence scores
 - **Flexible Thresholding**: Adjustable detection confidence threshold
 
+Class names shown on the output images are read from the checkpoint's `id2label` mapping.
+
 ### Usage Examples
+
+Provide exactly one of `--image_path` (single mode) or `--input_dir` (batch mode).
 
 #### Process a Single Image
 ```bash
@@ -130,8 +178,7 @@ python simple_inference.py \
     --model_path ./output/dinov3-smallplus-mask2former-1e4/step_1400_model \
     --input_dir /path/to/images/ \
     --output_dir /path/to/results/ \
-    --threshold 0.5 \
-    --batch
+    --threshold 0.5
 ```
 
 #### Recursive Directory Processing
@@ -140,19 +187,17 @@ python simple_inference.py \
     --model_path ./output/dinov3-smallplus-mask2former-1e4/step_1400_model \
     --input_dir /path/to/images/ \
     --output_dir /path/to/results/ \
-    --recursive \
-    --batch
+    --recursive
 ```
 
 ### Parameters
-- `--model_path, -m`: Path to the trained model directory
-- `--image_path, -i`: Path to a single image (for single image mode)
-- `--input_dir, -d`: Input directory containing images (for batch mode)
-- `--output_dir, -od`: Output directory for results (for batch mode)
+- `--model_path, -m`: Path to the trained model directory (required)
+- `--image_path, -i`: Path to a single image (single image mode)
+- `--input_dir, -d`: Input directory containing images (batch mode)
+- `--output_dir, -od`: Output directory for batch results (default: `results`)
 - `--output, -o`: Output path for single image result
 - `--threshold, -t`: Detection confidence threshold (default: 0.5)
-- `--batch, -b`: Enable batch processing mode
-- `--recursive, -r`: Process subdirectories recursively
+- `--recursive, -r`: Process subdirectories recursively (batch mode)
 
 ## Features
 

@@ -1,28 +1,31 @@
 """
-Models module for DINOv3-Mask2Former implementation
+Models module for the DINOv3-Mask2Former implementation.
+
+Variant files (mask2former_dinov3_*.py) are normally loaded dynamically by
+file path via the --model argument; this package interface is provided for
+programmatic use.
 """
 
+from .dinov3_mask2former_base import (
+    Adapter,
+    DinoV3WithAdapterBackbone,
+    PyramidAdapter,
+    build_mask2former_dinov3_model,
+    get_model_info,
+)
 from .mask2former_dinov3_vitsmallplus import (
     create_mask2former_dinov3_model as create_small_model,
-    get_model_info as get_small_model_info,
-    Adapter as SmallAdapter,
-    DinoV3WithAdapterBackbone as SmallDinoV3Backbone
 )
-
 from .mask2former_dinov3_vitlarge import (
     create_mask2former_dinov3_model as create_large_model,
-    get_model_info as get_large_model_info,
-    Adapter as LargeAdapter,
-    DinoV3WithAdapterBackbone as LargeDinoV3Backbone
 )
 
 __all__ = [
+    "Adapter",
+    "PyramidAdapter",
+    "DinoV3WithAdapterBackbone",
+    "build_mask2former_dinov3_model",
+    "get_model_info",
     "create_small_model",
-    "get_small_model_info", 
-    "SmallAdapter",
-    "SmallDinoV3Backbone",
     "create_large_model",
-    "get_large_model_info",
-    "LargeAdapter", 
-    "LargeDinoV3Backbone"
 ]

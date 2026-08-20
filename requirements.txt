@@ -1,9 +1,12 @@
 torch
-huggingface
-transformers
+transformers>=4.56.0
 accelerate
-Albumentations
-datasets
+albumentations
+datasets>=2.0.0
 torchmetrics
 pycocotools
+safetensors
+Pillow
+numpy
+tqdm
 huggingface_hub[cli]

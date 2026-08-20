@@ -1,169 +1,54 @@
 """
-DINOv3-Mask2Former Large Model Implementation
+DINOv3 ViT-Large backbone + Mask2Former (Swin-Large head configuration).
 
-This module provides a complete DINOv3-Mask2Former model with custom backbone replacement.
-The model uses DINOv3-Large as the backbone and Mask2Former as the segmentation head.
+This file is loaded dynamically by file path from the training/inference
+scripts. The shared implementation lives in dinov3_mask2former_base.py.
 """
 
-import torch
-import torch.nn as nn
-from typing import List, Dict
-from transformers import AutoModel, AutoModelForUniversalSegmentation
-from transformers.modeling_outputs import BackboneOutput
-import logging
+import os
+import sys
+from typing import Dict
 
-logger = logging.getLogger(__name__)
+_MODELS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _MODELS_DIR not in sys.path:
+    sys.path.insert(0, _MODELS_DIR)
 
+from dinov3_mask2former_base import (  # noqa: E402
+    Adapter,
+    DinoV3WithAdapterBackbone,
+    build_mask2former_dinov3_model,
+    get_model_info,
+)
 
-class Adapter(nn.Module):
-    """
-    Adapter module to convert DINOv3 features to expected channels for Mask2Former head.
-    """
-    def __init__(self, in_channels: int, out_channels: List[int]):
-        super().__init__()
-        self.projections = nn.ModuleList([
-            nn.Conv2d(in_channels, out_ch, kernel_size=1) for out_ch in out_channels
-        ])
-    
-    def forward(self, features: List[torch.Tensor]) -> List[torch.Tensor]:
-        return [self.projections[i](feat) for i, feat in enumerate(features)]
+# Read by the training script to load the matching image processor.
+MASK2FORMER_MODEL_NAME = "facebook/mask2former-swin-large-coco-instance"
+DINOV3_MODEL_NAME = "facebook/dinov3-vitl16-pretrain-lvd1689m"
+EXPECTED_CHANNELS = [192, 384, 768, 1536]
+LAYERS_TO_EXTRACT = [5, 11, 17, 23]
 
-
-class DinoV3WithAdapterBackbone(nn.Module):
-    """
-    Custom backbone that combines DINOv3-Large with adapter layers for Mask2Former compatibility.
-    """
-    def __init__(self, model_name: str, out_channels: List[int]):
-        super().__init__()
-        self.model = AutoModel.from_pretrained(model_name)
-        self.adapter = Adapter(self.model.config.hidden_size, out_channels)
-        self.channels = list(out_channels)
-        
-        # Define output features for Mask2Former compatibility
-        self.out_features = [f"stage_{i}" for i in range(len(out_channels))]
-        self._out_feature_channels = {name: ch for name, ch in zip(self.out_features, out_channels)}
-        self._out_feature_strides = {"stage_0": 8, "stage_1": 16, "stage_2": 32, "stage_3": 32}
-        
-        # Layers to extract from DINOv3-Large (different depths for multi-scale features)
-        self.layers_to_extract = [5, 11, 17, 23]  # Adjusted for Large model (24 layers total)
-    
-    def forward(self, x: torch.Tensor) -> BackboneOutput:
-        # Get DINOv3 outputs with all hidden states
-        outputs = self.model(pixel_values=x, output_hidden_states=True, return_dict=True)
-        hidden_states = outputs.hidden_states
-        
-        # Calculate spatial dimensions after patch embedding
-        batch_size, _, height, width = x.shape
-        patch_size = self.model.config.patch_size
-        patch_height, patch_width = height // patch_size, width // patch_size
-        
-        # DINOv3 prepends a CLS token and optional register tokens before patch tokens.
-        prefix_tokens = 1 + getattr(self.model.config, "num_register_tokens", 0)
-
-        # Extract features from different layers
-        extracted_features = []
-        for layer_idx in self.layers_to_extract:
-            layer_output = hidden_states[layer_idx + 1]
-            patch_tokens = layer_output[:, prefix_tokens:, :]
-            # Reshape from (B, N, C) to (B, C, H, W)
-            feature_map = patch_tokens.permute(0, 2, 1).reshape(
-                batch_size, self.model.config.hidden_size, patch_height, patch_width
-            )
-            extracted_features.append(feature_map)
-        
-        # Apply adapter to convert channels
-        adapted_features = self.adapter(extracted_features)
-
-        return BackboneOutput(
-            feature_maps=tuple(adapted_features),
-            hidden_states=tuple(hidden_states),
-            attentions=outputs.attentions,
-        )
+__all__ = [
+    "Adapter",
+    "DinoV3WithAdapterBackbone",
+    "MASK2FORMER_MODEL_NAME",
+    "create_mask2former_dinov3_model",
+    "get_model_info",
+]
 
 
 def create_mask2former_dinov3_model(
     label2id: Dict[str, int],
     id2label: Dict[int, str],
-    dinov3_model_name: str = "facebook/dinov3-vitl16-pretrain-lvd1689m",
-    expected_channels: List[int] = [192, 384, 768, 1536],  # Swin-Large head configuration
     freeze_backbone: bool = True,
-    hub_token: str = None
-) -> AutoModelForUniversalSegmentation:
-    """
-    Create a complete DINOv3-Large-Mask2Former model with custom backbone replacement.
-    
-    Args:
-        label2id: Dictionary mapping label names to IDs
-        id2label: Dictionary mapping IDs to label names
-        dinov3_model_name: HuggingFace model name for DINOv3-Large
-        expected_channels: List of output channels for each stage (Large configuration)
-        freeze_backbone: Whether to freeze DINOv3 backbone weights
-        hub_token: HuggingFace Hub token if needed
-    
-    Returns:
-        Complete DINOv3-Large-Mask2Former model ready for training/inference
-    """
-    # Fixed Mask2Former base model - using Large version
-    mask2former_model_name = "facebook/mask2former-swin-large-coco-instance"
-    
-    logger.info(f"Creating DINOv3-Large-Mask2Former model...")
-    logger.info(f"  - Mask2Former base: {mask2former_model_name}")
-    logger.info(f"  - DINOv3 backbone: {dinov3_model_name}")
-    logger.info(f"  - Expected channels: {expected_channels}")
-    logger.info(f"  - Freeze backbone: {freeze_backbone}")
-    
-    # 1. Load the base Mask2Former-Large model
-    model = AutoModelForUniversalSegmentation.from_pretrained(
-        mask2former_model_name,
+    hub_token: str = None,
+):
+    return build_mask2former_dinov3_model(
         label2id=label2id,
         id2label=id2label,
-        ignore_mismatched_sizes=True,
-        token=hub_token,
+        mask2former_model_name=MASK2FORMER_MODEL_NAME,
+        dinov3_model_name=DINOV3_MODEL_NAME,
+        expected_channels=EXPECTED_CHANNELS,
+        layers_to_extract=LAYERS_TO_EXTRACT,
+        freeze_backbone=freeze_backbone,
+        hub_token=hub_token,
+        use_feature_pyramid=False,
     )
-    
-    # 2. Create custom DINOv3-Large backbone with adapter
-    custom_backbone = DinoV3WithAdapterBackbone(dinov3_model_name, expected_channels)
-    
-    # 3. Replace the encoder actually used by Mask2Former during training/inference.
-    model.model.pixel_level_module.encoder = custom_backbone
-    
-    # 4. Freeze DINOv3 weights if requested
-    if freeze_backbone:
-        for param in model.model.pixel_level_module.encoder.model.parameters():
-            param.requires_grad = False
-        logger.info("DINOv3-Large backbone weights frozen.")
-    else:
-        logger.info("DINOv3-Large backbone weights remain trainable.")
-    
-    logger.info("Successfully created DINOv3-Large-Mask2Former model.")
-    
-    return model
-
-
-def get_model_info(model: AutoModelForUniversalSegmentation) -> Dict:
-    """
-    Get information about the DINOv3-Large-Mask2Former model.
-    
-    Args:
-        model: The DINOv3-Large-Mask2Former model
-        
-    Returns:
-        Dictionary with model information
-    """
-    backbone = model.model.pixel_level_module.encoder
-    
-    # Count parameters
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    backbone_params = sum(p.numel() for p in backbone.model.parameters())
-    frozen_params = sum(p.numel() for p in backbone.model.parameters() if not p.requires_grad)
-    
-    return {
-        "total_parameters": total_params,
-        "trainable_parameters": trainable_params,
-        "backbone_parameters": backbone_params,
-        "frozen_parameters": frozen_params,
-        "backbone_model": backbone.model.config.name_or_path if hasattr(backbone.model.config, 'name_or_path') else "DINOv3-Large",
-        "output_channels": list(backbone._out_feature_channels.values()),
-        "output_strides": list(backbone._out_feature_strides.values()),
-    }

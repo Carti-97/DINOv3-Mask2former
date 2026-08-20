@@ -22,12 +22,14 @@ It has been adapted to replace the original backbone with DINOv3 models and supp
 """Finetuning 🤗 Transformers model for instance segmentation with Accelerate 🚀."""
 
 import argparse
+import importlib.util
 import json
 import logging
 import math
 import os
-import sys
 import pickle
+import re
+import sys
 from collections.abc import Mapping
 from functools import partial
 from pathlib import Path
@@ -45,24 +47,18 @@ from torch.utils.data import DataLoader, Dataset
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
 from tqdm import tqdm
 from pycocotools.coco import COCO
+from pycocotools import mask as coco_mask_utils
 from PIL import Image
 
 import transformers
 from transformers import (
     AutoImageProcessor,
-    AutoModelForUniversalSegmentation,
     SchedulerType,
     get_scheduler,
 )
 from transformers.image_processing_utils import BatchFeature
-from transformers.utils import check_min_version, send_example_telemetry
+from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
-
-import torch.nn as nn
-from typing import List, Dict
-import importlib.util
-import sys
-import os
 
 logger = logging.getLogger(__name__)
 
@@ -70,53 +66,40 @@ logger = logging.getLogger(__name__)
 check_min_version("4.56.0.dev0")
 
 
-def load_model_from_config(model_path: str):
+def load_model_module(model_path: str):
     """
-    Dynamically load model creation function and mask2former model name from the specified Python file.
-    
+    Dynamically load a model variant module from the specified Python file.
+
     Args:
         model_path: Path to the Python model file (e.g., "models/mask2former_dinov3_vitsmallplus.py")
-        
+
     Returns:
         Tuple of (create_mask2former_dinov3_model function, mask2former_model_name string)
     """
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model file not found: {model_path}")
-    
-    # Extract module name from file path
+
     module_name = os.path.splitext(os.path.basename(model_path))[0]
-    
-    # Load module dynamically
     spec = importlib.util.spec_from_file_location(module_name, model_path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
-    
-    # Get the model creation function
-    if not hasattr(module, 'create_mask2former_dinov3_model'):
-        raise AttributeError(f"Model file {model_path} does not contain 'create_mask2former_dinov3_model' function")
-    
-    # Extract mask2former_model_name from the function source by executing it partially
-    # This is a bit hacky but works - we'll look at the function's source code
-    import inspect
-    func_source = inspect.getsource(module.create_mask2former_dinov3_model)
-    
-    # Extract mask2former_model_name from function source
-    mask2former_model_name = None
-    for line in func_source.split('\n'):
-        line = line.strip()
-        if line.startswith('mask2former_model_name') and '=' in line:
-            # Parse the line: mask2former_model_name = "facebook/mask2former-swin-small-coco-instance"
-            mask2former_model_name = line.split('=', 1)[1].strip().strip('"\'')
-            break
-    
-    if not mask2former_model_name:
-        logger.warning(f"Could not find mask2former_model_name in {model_path}, using default")
-        mask2former_model_name = "facebook/mask2former-swin-small-coco-instance"
-    
+
+    if not hasattr(module, "create_mask2former_dinov3_model"):
+        raise AttributeError(
+            f"Model file {model_path} does not contain a 'create_mask2former_dinov3_model' function"
+        )
+    if not hasattr(module, "MASK2FORMER_MODEL_NAME"):
+        raise AttributeError(
+            f"Model file {model_path} must define MASK2FORMER_MODEL_NAME "
+            "(the Mask2Former base checkpoint whose image processor is used). "
+            "No default is assumed."
+        )
+
+    mask2former_model_name = module.MASK2FORMER_MODEL_NAME
     logger.info(f"Successfully loaded model from: {model_path}")
-    logger.info(f"  - Detected mask2former base model: {mask2former_model_name}")
-    
+    logger.info(f"  - Mask2Former base model: {mask2former_model_name}")
+
     return module.create_mask2former_dinov3_model, mask2former_model_name
 
 def save_dinov3_backbone_config(save_dir: str, model_path: str):
@@ -139,101 +122,124 @@ require_version("datasets>=2.0.0", "To fix: pip install -r examples/pytorch/inst
 # ===================== COCO Dataset Class =====================
 class COCOInstanceDataset(Dataset):
     """COCO dataset optimized for instance segmentation"""
-    
+
+    CACHE_VERSION = 2
+
     def __init__(self, data_dir, split, image_processor, transform=None, use_cache=True):
         self.data_dir = Path(data_dir)
         self.split = split
         self.image_processor = image_processor
         self.transform = transform
-        
+
         ann_file = self.data_dir / split / "_annotations.coco.json"
         cache_file = self.data_dir / split / "_cache.pkl"
-        
+
         if not ann_file.exists():
             raise FileNotFoundError(f"Annotation file not found: {ann_file}")
-        
-        # Cache handling
+
+        ann_stat = ann_file.stat()
+        ann_fingerprint = (ann_stat.st_size, ann_stat.st_mtime_ns)
+
+        cache_data = None
         if use_cache and cache_file.exists():
-            logger.info(f"Loading cached annotations from {cache_file}")
-            with open(cache_file, 'rb') as f:
-                cache_data = pickle.load(f)
-                self.image_ids = cache_data['image_ids']
-                self.annotations = cache_data['annotations']
-                self.categories = cache_data['categories']
-                self.coco = None  # Don't need COCO object when using cache
+            with open(cache_file, "rb") as f:
+                candidate = pickle.load(f)
+            if (
+                candidate.get("cache_version") == self.CACHE_VERSION
+                and candidate.get("ann_fingerprint") == ann_fingerprint
+            ):
+                logger.info(f"Loading cached annotations from {cache_file}")
+                cache_data = candidate
+            else:
+                logger.info(
+                    f"Cache {cache_file} is stale or from an older format - rebuilding"
+                )
+
+        if cache_data is not None:
+            self.image_ids = cache_data["image_ids"]
+            self.annotations = cache_data["annotations"]
+            self.categories = cache_data["categories"]
         else:
             logger.info(f"Building annotation cache for {split}")
-            self.coco = COCO(ann_file)
-            self.image_ids = list(self.coco.imgs.keys())
-            self.categories = {cat['id']: cat['name'] 
-                              for cat in self.coco.loadCats(self.coco.getCatIds())}
-            
+            coco = COCO(ann_file)
+            self.image_ids = list(coco.imgs.keys())
+            self.categories = {
+                cat["id"]: cat["name"] for cat in coco.loadCats(coco.getCatIds())
+            }
+
             # Pre-process annotations
             self.annotations = {}
-            for idx, img_id in enumerate(tqdm(self.image_ids, desc="Caching annotations")):
-                img_info = self.coco.loadImgs(img_id)[0]
-                ann_ids = self.coco.getAnnIds(imgIds=img_id)
-                anns = self.coco.loadAnns(ann_ids)
-                
+            for img_id in tqdm(self.image_ids, desc="Caching annotations"):
+                img_info = coco.loadImgs(img_id)[0]
+                ann_ids = coco.getAnnIds(imgIds=img_id)
+                anns = coco.loadAnns(ann_ids)
+
                 self.annotations[img_id] = {
-                    'file_name': img_info['file_name'],
-                    'height': img_info['height'],
-                    'width': img_info['width'],
-                    'anns': anns  # Keep annotations, generate masks on demand
+                    "file_name": img_info["file_name"],
+                    "height": img_info["height"],
+                    "width": img_info["width"],
+                    "anns": anns,  # Keep annotations, generate masks on demand
                 }
-            
-            # Save cache
+
             if use_cache:
-                cache_data = {
-                    'image_ids': self.image_ids,
-                    'annotations': self.annotations,
-                    'categories': self.categories
+                cache_payload = {
+                    "cache_version": self.CACHE_VERSION,
+                    "ann_fingerprint": ann_fingerprint,
+                    "image_ids": self.image_ids,
+                    "annotations": self.annotations,
+                    "categories": self.categories,
                 }
-                with open(cache_file, 'wb') as f:
-                    pickle.dump(cache_data, f)
+                tmp_file = cache_file.with_suffix(".pkl.tmp")
+                with open(tmp_file, "wb") as f:
+                    pickle.dump(cache_payload, f)
+                os.replace(tmp_file, cache_file)
                 logger.info(f"Cache saved to {cache_file}")
-    
+
     def __len__(self):
         return len(self.image_ids)
-    
+
     def __getitem__(self, idx):
         img_id = self.image_ids[idx]
         ann_data = self.annotations[img_id]
-        
+
         # Load image
-        img_path = self.data_dir / self.split / ann_data['file_name']
-        image = Image.open(img_path).convert('RGB')
-        
+        img_path = self.data_dir / self.split / ann_data["file_name"]
+        image = Image.open(img_path).convert("RGB")
+
+        h, w = ann_data["height"], ann_data["width"]
+        if image.size != (w, h):
+            raise ValueError(
+                f"Image size mismatch for {img_path}: annotation says {(w, h)} (w, h) "
+                f"but the image is {image.size}. Fix the annotations or the image."
+            )
+
         # Generate masks on-demand
-        h, w = ann_data['height'], ann_data['width']
         instance_mask = np.zeros((h, w), dtype=np.int32)
         instance_to_semantic = {}
-        
-        for i, ann in enumerate(ann_data['anns'], 1):
-            if 'segmentation' in ann:
-                if self.coco:
-                    mask = self.coco.annToMask(ann)
-                else:
-                    mask = self._poly_to_mask(ann['segmentation'], h, w)
+
+        for i, ann in enumerate(ann_data["anns"], 1):
+            if "segmentation" in ann and ann["segmentation"]:
+                mask = self._ann_to_mask(ann["segmentation"], h, w)
                 instance_mask[mask > 0] = i
-                instance_to_semantic[i] = ann['category_id']
-        
+                instance_to_semantic[i] = ann["category_id"]
+
         # Apply transforms
         if self.transform:
             image_np = np.array(image)
             output = self.transform(image=image_np, mask=instance_mask)
             image = output["image"]
             instance_mask = output["mask"]
-            
-            # Remap instance IDs after augmentation
+
+            # Remap instance IDs after augmentation (instances may disappear)
             unique_ids = np.unique(instance_mask)
             instance_to_semantic = {
-                int(inst_id): instance_to_semantic.get(inst_id, 0)
-                for inst_id in unique_ids if inst_id > 0
+                int(inst_id): instance_to_semantic[int(inst_id)]
+                for inst_id in unique_ids
+                if inst_id > 0
             }
         else:
             image = np.array(image)
-        
+
         # Apply image processor
         inputs = self.image_processor(
             images=[image],
@@ -241,24 +247,33 @@ class COCOInstanceDataset(Dataset):
             instance_id_to_semantic_id=instance_to_semantic,
             return_tensors="pt",
         )
-        
+
         return {
             "pixel_values": inputs.pixel_values[0],
             "mask_labels": inputs.mask_labels[0],
             "class_labels": inputs.class_labels[0],
-            "original_size": (h, w),  # 원본 크기 추가
+            "original_size": (h, w),
         }
-    
+
     @staticmethod
-    def _poly_to_mask(polygons, h, w):
-        """Convert polygon to mask without COCO"""
-        import cv2
-        mask = np.zeros((h, w), dtype=np.uint8)
-        for polygon in polygons:
-            if len(polygon) % 2 == 0 and len(polygon) >= 6:
-                pts = np.array(polygon).reshape(-1, 2).astype(np.int32)
-                cv2.fillPoly(mask, [pts], 1)
-        return mask
+    def _ann_to_mask(segmentation, h, w):
+        """Decode a COCO segmentation (polygon, RLE or uncompressed RLE) to a binary mask."""
+        if isinstance(segmentation, list):
+            polygons = [p for p in segmentation if len(p) >= 6 and len(p) % 2 == 0]
+            if not polygons:
+                return np.zeros((h, w), dtype=np.uint8)
+            rles = coco_mask_utils.frPyObjects(polygons, h, w)
+            rle = coco_mask_utils.merge(rles)
+        elif isinstance(segmentation, dict):
+            if isinstance(segmentation["counts"], list):
+                rle = coco_mask_utils.frPyObjects(segmentation, h, w)
+            else:
+                rle = segmentation
+        else:
+            raise ValueError(
+                f"Unsupported COCO segmentation format: {type(segmentation)}"
+            )
+        return coco_mask_utils.decode(rle)
 
 
 def augment_and_transform_batch(
@@ -318,18 +333,7 @@ def collate_fn(examples):
     return batch
 
 
-def nested_cpu(tensors):
-    if isinstance(tensors, (list, tuple)):
-        return type(tensors)(nested_cpu(t) for t in tensors)
-    elif isinstance(tensors, Mapping):
-        return type(tensors)({k: nested_cpu(t) for k, t in tensors.items()})
-    elif isinstance(tensors, torch.Tensor):
-        return tensors.cpu().detach()
-    else:
-        return tensors
-
-
-def evaluation_loop(model, image_processor, accelerator: Accelerator, dataloader, id2label):
+def evaluation_loop(model, image_processor, accelerator: Accelerator, dataloader):
     # Each GPU maintains its own metric instance
     metric = MeanAveragePrecision(iou_type="segm", class_metrics=True).to(accelerator.device)
 
@@ -370,8 +374,8 @@ def evaluation_loop(model, image_processor, accelerator: Accelerator, dataloader
             else:
                 pred = {
                     "masks": torch.zeros([0, *target_size], dtype=torch.bool, device=accelerator.device),
-                    "labels": torch.tensor([], device=accelerator.device),
-                    "scores": torch.tensor([], device=accelerator.device),
+                    "labels": torch.tensor([], dtype=torch.long, device=accelerator.device),
+                    "scores": torch.tensor([], dtype=torch.float32, device=accelerator.device),
                 }
             post_processed_predictions.append(pred)
             
@@ -421,11 +425,13 @@ def handle_repository_creation(accelerator: Accelerator, args: argparse.Namespac
             api = HfApi()
             repo_id = api.create_repo(repo_name, exist_ok=True, token=args.hub_token).repo_id
 
-            with open(os.path.join(args.output_dir, ".gitignore"), "w+") as gitignore:
-                if "step_*" not in gitignore:
-                    gitignore.write("step_*\n")
-                if "epoch_*" not in gitignore:
-                    gitignore.write("epoch_*\n")
+            gitignore_path = os.path.join(args.output_dir, ".gitignore")
+            with open(gitignore_path, "a+") as gitignore:
+                gitignore.seek(0)
+                existing = gitignore.read()
+                for pattern in ("step_*", "epoch_*"):
+                    if pattern not in existing:
+                        gitignore.write(f"{pattern}\n")
         elif args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
     accelerator.wait_for_everyone()
@@ -443,15 +449,6 @@ def parse_args():
         default=None,
         help="Path to JSON config file containing training arguments"
     )
-
-    # 임시로 config 인자만 먼저 파싱합니다.
-    temp_args, _ = parser.parse_known_args()
-
-    # 기본값을 담을 딕셔너리
-    defaults = {}
-    if temp_args.config:
-        with open(temp_args.config, 'r') as f:
-            defaults = json.load(f)
 
     parser.add_argument(
         "--model",
@@ -580,21 +577,51 @@ def parse_args():
         default=None,
         help="If the training should continue from a checkpoint folder.",
     )
-    
-    parser.set_defaults(**defaults)
+    parser.add_argument(
+        "--freeze_backbone",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Freeze the DINOv3 backbone weights (use --no-freeze_backbone to finetune the backbone).",
+    )
+    parser.add_argument(
+        "--use_augmentation",
+        action="store_true",
+        help=(
+            "Apply training-time augmentations (horizontal flip + brightness/contrast). "
+            "Do not enable flips for datasets whose class labels depend on position."
+        ),
+    )
+    parser.add_argument(
+        "--max_grad_norm",
+        type=float,
+        default=None,
+        help="If set, clip gradients to this max norm (the Mask2Former paper uses 0.01).",
+    )
+    parser.add_argument(
+        "--logging_steps",
+        type=int,
+        default=50,
+        help="Log training loss and learning rate every N optimization steps.",
+    )
+
+    # First pass: pick up --config, then apply the JSON file as defaults so
+    # that explicit command-line arguments still take precedence.
+    temp_args, _ = parser.parse_known_args()
+    if temp_args.config:
+        with open(temp_args.config, "r") as f:
+            config_defaults = json.load(f)
+
+        known_dests = {action.dest for action in parser._actions}
+        unknown_keys = sorted(set(config_defaults) - known_dests)
+        if unknown_keys:
+            raise ValueError(
+                f"Unknown keys in config file {temp_args.config}: {unknown_keys}. "
+                f"Valid keys are: {sorted(known_dests - {'help'})}"
+            )
+        parser.set_defaults(**config_defaults)
 
     args = parser.parse_args()
-    
-    # Load JSON config if provided and merge with command line args
-    if args.config:
-        with open(args.config, 'r') as f:
-            config = json.load(f)
-            
-        # Set defaults from config file (command line args take precedence)
-        for key, value in config.items():
-            if not hasattr(args, key) or getattr(args, key) is None:
-                setattr(args, key, value)
-    
+
     # Validate required arguments
     if not args.model:
         raise ValueError("--model parameter is required (either via command line or config file)")
@@ -602,22 +629,18 @@ def parse_args():
         raise ValueError("--dataset_name parameter is required (either via command line or config file)")
     if not args.output_dir:
         raise ValueError("--output_dir parameter is required (either via command line or config file)")
-    if args.output_dir is not None:
-        os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(args.output_dir, exist_ok=True)
 
     return args
 
 
 def main():
     args = parse_args()
-    
-    # Load model creation function and mask2former model name from config
-    create_mask2former_dinov3_model, image_processor_model = load_model_from_config(args.model)
+
+    # Load model creation function and mask2former model name from the model file
+    create_mask2former_dinov3_model, image_processor_model = load_model_module(args.model)
     logger.info(f"Using image processor: {image_processor_model}")
 
-    # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
-    # information sent is the one passed as arguments along with your Python/PyTorch versions.
-    send_example_telemetry("run_instance_segmentation_no_trainer", args)
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
     accelerator = Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps, kwargs_handlers=[ddp_kwargs])
@@ -639,73 +662,82 @@ def main():
     # ------------------------------------------------------------------------------------------------
     
     # Check if dataset_name is a local directory (COCO dataset)
-    if Path(args.dataset_name).is_dir():
+    is_local_coco = Path(args.dataset_name).is_dir()
+
+    # Define augmentations (photometric + flip; enable explicitly via --use_augmentation)
+    if args.use_augmentation:
+        train_transform = A.Compose([
+            A.HorizontalFlip(p=0.5),
+            A.RandomBrightnessContrast(p=0.3),
+        ])
+        logger.info("Training augmentations enabled: HorizontalFlip, RandomBrightnessContrast")
+    else:
+        train_transform = A.Compose([A.NoOp()])
+    val_transform = A.Compose([A.NoOp()])
+
+    if is_local_coco:
         logger.info(f"Loading local COCO dataset from {args.dataset_name}")
-        
+
         # Initialize image processor using the model's mask2former_model_name
         image_processor = AutoImageProcessor.from_pretrained(
             image_processor_model,
             do_resize=True,
             size={"height": args.image_height, "width": args.image_width},
             do_reduce_labels=args.do_reduce_labels,
-            reduce_labels=args.do_reduce_labels,
             token=args.hub_token,
         )
-        
-        # Define augmentations
-        train_transform = A.Compose([A.NoOp()])
-        
-        val_transform = A.Compose([A.NoOp()])
-        
-        # Create datasets
-        train_dataset = COCOInstanceDataset(
-            args.dataset_name,
-            "train",
-            image_processor,
-            transform=train_transform,
-            use_cache=True
-        )
-        
-        # Try to load validation set, if not available use subset of training
-        try:
-            val_dataset = COCOInstanceDataset(
+
+        # Create datasets. The annotation cache is built by the main process
+        # first so that distributed workers do not race on the cache file.
+        with accelerator.main_process_first():
+            train_dataset = COCOInstanceDataset(
                 args.dataset_name,
-                "valid",
+                "train",
                 image_processor,
-                transform=val_transform,
+                transform=train_transform,
                 use_cache=True
             )
-        except FileNotFoundError:
-            logger.warning("Validation dataset not found. Using 10% of training set.")
-            from torch.utils.data import random_split
-            train_size = int(0.9 * len(train_dataset))
-            val_size = len(train_dataset) - train_size
-            train_dataset, val_dataset = random_split(
-                train_dataset, 
-                [train_size, val_size],
-                generator=torch.Generator().manual_seed(42)
-            )
-        
+
+            # Try to load validation set, if not available use subset of training
+            try:
+                val_dataset = COCOInstanceDataset(
+                    args.dataset_name,
+                    "valid",
+                    image_processor,
+                    transform=val_transform,
+                    use_cache=True
+                )
+            except FileNotFoundError:
+                logger.warning("Validation dataset not found. Using 10% of training set.")
+                from torch.utils.data import random_split
+                train_size = int(0.9 * len(train_dataset))
+                val_size = len(train_dataset) - train_size
+                train_dataset, val_dataset = random_split(
+                    train_dataset,
+                    [train_size, val_size],
+                    generator=torch.Generator().manual_seed(42)
+                )
+
         # Setup label mappings
         if hasattr(train_dataset, 'categories'):
             label2id = {name: cat_id for cat_id, name in train_dataset.categories.items()}
         else:
             # If using random_split, access the underlying dataset
             label2id = {name: cat_id for cat_id, name in train_dataset.dataset.categories.items()}
-        
+
         if args.do_reduce_labels:
             label2id = {name: idx - 1 for name, idx in label2id.items() if idx != 0}
-        
+
         id2label = {v: k for k, v in label2id.items()}
-        
+
         # Create complete DINOv3-Mask2Former model
         model = create_mask2former_dinov3_model(
             label2id=label2id,
             id2label=id2label,
-            freeze_backbone=True,
+            freeze_backbone=args.freeze_backbone,
             hub_token=args.hub_token,
         )
-        
+
     else:
         # Original HuggingFace dataset loading code
         logger.info(f"Loading dataset from HuggingFace Hub: {args.dataset_name}")
@@ -723,30 +755,25 @@ def main():
         model = create_mask2former_dinov3_model(
             label2id=label2id,
             id2label=id2label,
-            freeze_backbone=True,
+            freeze_backbone=args.freeze_backbone,
             hub_token=args.hub_token,
         )
-        
+
         # Use image processor from model's mask2former_model_name
         image_processor = AutoImageProcessor.from_pretrained(
             image_processor_model,
             do_resize=True,
             size={"height": args.image_height, "width": args.image_width},
             do_reduce_labels=args.do_reduce_labels,
-            reduce_labels=args.do_reduce_labels,
             token=args.hub_token,
         )
-        
-        # Define image augmentations
-        train_augment_and_transform = A.Compose([A.NoOp()])
-        validation_transform = A.Compose([A.NoOp()])
-        
+
         # Transform functions for batch
         train_transform_batch = partial(
-            augment_and_transform_batch, transform=train_augment_and_transform, image_processor=image_processor
+            augment_and_transform_batch, transform=train_transform, image_processor=image_processor
         )
         validation_transform_batch = partial(
-            augment_and_transform_batch, transform=validation_transform, image_processor=image_processor
+            augment_and_transform_batch, transform=val_transform, image_processor=image_processor
         )
         
         with accelerator.main_process_first():
@@ -798,7 +825,7 @@ def main():
 
     # Figure out how many steps we should save the Accelerator states
     checkpointing_steps = args.checkpointing_steps
-    if checkpointing_steps is not None and checkpointing_steps.isdigit():
+    if isinstance(checkpointing_steps, str) and checkpointing_steps.isdigit():
         checkpointing_steps = int(checkpointing_steps)
 
     # Scheduler and math around the number of training steps.
@@ -852,37 +879,48 @@ def main():
     
     # Best epoch tracking
     best_epoch = -1
-    best_metric = -1.0  # mAP 기준으로 추적
+    best_metric = -1.0  # tracked on mAP
     best_metrics = {}
+
+    # Running loss for periodic logging
+    running_loss = 0.0
+    running_loss_count = 0
+
+    # Last validation metrics (used as final results when no test split exists)
+    metrics = None
 
     # Potentially load in the weights and states from a previous save
     if args.resume_from_checkpoint:
-        if args.resume_from_checkpoint is not None or args.resume_from_checkpoint != "":
-            checkpoint_path = args.resume_from_checkpoint
-            path = os.path.basename(args.resume_from_checkpoint)
-        else:
-            # Get the most recent checkpoint
-            dirs = [f.name for f in os.scandir(os.getcwd()) if f.is_dir()]
-            dirs.sort(key=os.path.getctime)
-            path = dirs[-1]  # Sorts folders by date modified, most recent checkpoint is the last
-            checkpoint_path = path
-            path = os.path.basename(checkpoint_path)
+        checkpoint_path = args.resume_from_checkpoint
+        if not os.path.isdir(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint folder not found: {checkpoint_path}")
 
         accelerator.print(f"Resumed from checkpoint: {checkpoint_path}")
         accelerator.load_state(checkpoint_path)
-        # Extract `epoch_{i}` or `step_{i}`
-        training_difference = os.path.splitext(path)[0]
 
-        if "epoch" in training_difference:
-            starting_epoch = int(training_difference.replace("epoch_", "")) + 1
+        # Extract the step/epoch from the checkpoint folder name.
+        # Supported names: `step_{i}_state`, `checkpoint_epoch_{i}` (this
+        # script) and the legacy `step_{i}` / `epoch_{i}` names.
+        checkpoint_name = os.path.basename(os.path.normpath(checkpoint_path))
+        epoch_match = re.search(r"epoch_(\d+)", checkpoint_name)
+        step_match = re.search(r"step_(\d+)", checkpoint_name)
+
+        if epoch_match:
+            starting_epoch = int(epoch_match.group(1)) + 1
             resume_step = None
             completed_steps = starting_epoch * num_update_steps_per_epoch
-        else:
+        elif step_match:
             # need to multiply `gradient_accumulation_steps` to reflect real steps
-            resume_step = int(training_difference.replace("step_", "")) * args.gradient_accumulation_steps
+            resume_step = int(step_match.group(1)) * args.gradient_accumulation_steps
             starting_epoch = resume_step // len(train_dataloader)
             completed_steps = resume_step // args.gradient_accumulation_steps
             resume_step -= starting_epoch * len(train_dataloader)
+        else:
+            raise ValueError(
+                f"Cannot infer the training position from checkpoint folder name "
+                f"'{checkpoint_name}'. Expected a name containing 'step_<N>' or 'epoch_<N>' "
+                f"(e.g. step_400_state, checkpoint_epoch_5)."
+            )
 
     # update the progress_bar if load from checkpoint
     progress_bar.update(completed_steps)
@@ -897,23 +935,35 @@ def main():
 
         for step, batch in enumerate(active_dataloader):
             with accelerator.accumulate(model):
-                # ================== FIX START ==================
-                # 모델이 예상하지 않는 'original_sizes' 인자를 제거합니다.
-                # 이 정보는 평가 시에만 필요합니다.
+                # 'original_sizes' is only needed for evaluation, the model does not accept it.
                 if "original_sizes" in batch:
                     batch.pop("original_sizes")
-                # ================== FIX END ====================
                 outputs = model(**batch)
                 loss = outputs.loss
                 accelerator.backward(loss)
+                if args.max_grad_norm is not None and accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(model.parameters(), args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
+
+            running_loss += loss.detach().float()
+            running_loss_count += 1
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 completed_steps += 1
+
+                if completed_steps % args.logging_steps == 0 and running_loss_count > 0:
+                    avg_loss = (running_loss / running_loss_count).item()
+                    current_lr = lr_scheduler.get_last_lr()[0]
+                    logger.info(
+                        f"step {completed_steps}: loss = {avg_loss:.4f}, lr = {current_lr:.3e}"
+                    )
+                    progress_bar.set_postfix(loss=f"{avg_loss:.4f}")
+                    running_loss = 0.0
+                    running_loss_count = 0
 
             if isinstance(checkpointing_steps, int):
                 if completed_steps % checkpointing_steps == 0 and accelerator.sync_gradients:
@@ -925,7 +975,7 @@ def main():
                         model.eval()
                         
                         # 2. 현재 스텝의 성능 메트릭 계산
-                        metrics = evaluation_loop(model, image_processor, accelerator, valid_dataloader, id2label)
+                        metrics = evaluation_loop(model, image_processor, accelerator, valid_dataloader)
                         logger.info(f"Metrics at step {completed_steps}: {metrics}")
                         
                         # 3. 다시 train 모드로 전환하여 학습 계속
@@ -986,7 +1036,8 @@ def main():
                 break
 
         logger.info("***** Running evaluation *****")
-        metrics = evaluation_loop(model, image_processor, accelerator, valid_dataloader, id2label)
+        model.eval()
+        metrics = evaluation_loop(model, image_processor, accelerator, valid_dataloader)
 
         logger.info(f"epoch {epoch}: {metrics}")
 
@@ -1083,21 +1134,52 @@ def main():
             accelerator.save_state(checkpoint_dir)
 
     # ------------------------------------------------------------------------------------------------
-    # Run evaluation on test dataset and save the model
+    # Final evaluation (on the test split when available) and save the model
     # ------------------------------------------------------------------------------------------------
 
-    logger.info("***** Running evaluation on test dataset *****")
-    metrics = evaluation_loop(model, image_processor, accelerator, valid_dataloader, id2label)
-    
-    processed_metrics = {}
-    for key, value in metrics.items():
-        if isinstance(value, torch.Tensor):
-            # 텐서가 단일 값(scalar)을 가지면 .item()으로, 여러 값을 가지면 .tolist()로 변환
-            processed_metrics[f"test_{key}"] = value.tolist() if value.numel() > 1 else value.item()
-        else:
-            processed_metrics[f"test_{key}"] = value
+    test_ann_file = (
+        Path(args.dataset_name) / "test" / "_annotations.coco.json" if is_local_coco else None
+    )
+    if test_ann_file is not None and test_ann_file.exists():
+        logger.info("***** Running final evaluation on the test split *****")
+        with accelerator.main_process_first():
+            test_dataset = COCOInstanceDataset(
+                args.dataset_name,
+                "test",
+                image_processor,
+                transform=val_transform,
+                use_cache=True,
+            )
+        test_dataloader = DataLoader(
+            test_dataset,
+            shuffle=False,
+            batch_size=args.per_device_eval_batch_size,
+            **dataloader_common_args,
+        )
+        test_dataloader = accelerator.prepare(test_dataloader)
+        model.eval()
+        final_metrics = evaluation_loop(model, image_processor, accelerator, test_dataloader)
+        final_prefix = "test"
+    elif metrics is not None:
+        logger.info("No test split found - reporting the last validation metrics as final results.")
+        final_metrics = metrics
+        final_prefix = "valid"
+    else:
+        logger.info("No test split found - running final evaluation on the validation split.")
+        model.eval()
+        final_metrics = evaluation_loop(model, image_processor, accelerator, valid_dataloader)
+        final_prefix = "valid"
 
-    logger.info(f"Test metrics: {processed_metrics}")
+    processed_metrics = {}
+    for key, value in final_metrics.items():
+        if isinstance(value, torch.Tensor):
+            processed_metrics[f"{final_prefix}_{key}"] = (
+                value.tolist() if value.numel() > 1 else value.item()
+            )
+        else:
+            processed_metrics[f"{final_prefix}_{key}"] = value
+
+    logger.info(f"Final ({final_prefix}) metrics: {processed_metrics}")
 
     if args.output_dir is not None:
         accelerator.wait_for_everyone()

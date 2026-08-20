@@ -1,8 +1,11 @@
 """
-DINOv3 ViT-Small+ backbone + Mask2Former (Swin-Small head configuration).
+DINOv3 ViT-Small+ backbone + Mask2Former (Swin-Small head configuration),
+with a ViTDet-style simple feature pyramid.
 
-This file is loaded dynamically by file path from the training/inference
-scripts. The shared implementation lives in dinov3_mask2former_base.py.
+Unlike the plain variant (all feature maps at stride 16), the tapped features
+are resampled to strides 4/8/16/32, matching the multi-scale pyramid the
+Mask2Former pixel decoder was designed for. Checkpoints are NOT compatible
+with the plain variant.
 """
 
 import os
@@ -14,8 +17,8 @@ if _MODELS_DIR not in sys.path:
     sys.path.insert(0, _MODELS_DIR)
 
 from dinov3_mask2former_base import (  # noqa: E402
-    Adapter,
     DinoV3WithAdapterBackbone,
+    PyramidAdapter,
     build_mask2former_dinov3_model,
     get_model_info,
 )
@@ -27,8 +30,8 @@ EXPECTED_CHANNELS = [96, 192, 384, 768]
 LAYERS_TO_EXTRACT = [2, 5, 8, 11]
 
 __all__ = [
-    "Adapter",
     "DinoV3WithAdapterBackbone",
+    "PyramidAdapter",
     "MASK2FORMER_MODEL_NAME",
     "create_mask2former_dinov3_model",
     "get_model_info",
@@ -50,5 +53,5 @@ def create_mask2former_dinov3_model(
         layers_to_extract=LAYERS_TO_EXTRACT,
         freeze_backbone=freeze_backbone,
         hub_token=hub_token,
-        use_feature_pyramid=False,
+        use_feature_pyramid=True,
     )

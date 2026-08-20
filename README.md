@@ -16,7 +16,7 @@
   - Compatible with transformers v5 (removed the deleted `send_example_telemetry` API).
 - **New training options**: `--freeze_backbone/--no-freeze_backbone`, `--use_augmentation`, `--max_grad_norm`, `--logging_steps` (periodic loss/LR logging).
 - **Final evaluation uses the `test` split** when `dataset/<name>/test/_annotations.coco.json` exists (falls back to reporting the last validation metrics, clearly logged).
-- **Feature-pyramid model variants** (`models/*_pyramid.py`): ViTDet-style simple feature pyramid producing true multi-scale features (strides 4/8/16/32) instead of four stride-16 maps. Not weight-compatible with the plain variants.
+- **Feature-pyramid model variants** (`models/*_pyramid.py`): ViTDet-style simple feature pyramid producing true multi-scale features (strides 4/8/16/32) instead of four stride-16 maps. Not weight-compatible with the plain variants. In an A/B test on a private industrial dataset the pyramid variant improved valid mAP from 0.9431 to 0.9469 with 11 of 14 classes improving — see [docs/pyramid-adapter-benchmark](./docs/pyramid-adapter-benchmark/README.md).
 - **Model code deduplicated**: shared implementation in `models/dinov3_mask2former_base.py`; variant files only define constants.
 - **Class names at inference come from the checkpoint's `id2label`** instead of a hardcoded list.
 - `requirements.txt` cleaned up (removed the bogus `huggingface` package, added missing dependencies).

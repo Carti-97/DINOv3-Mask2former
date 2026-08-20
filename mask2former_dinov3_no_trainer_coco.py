@@ -333,7 +333,7 @@ def collate_fn(examples):
     return batch
 
 
-def evaluation_loop(model, image_processor, accelerator: Accelerator, dataloader):
+def evaluation_loop(model, image_processor, accelerator: Accelerator, dataloader, score_threshold: float = 0.0):
     # Each GPU maintains its own metric instance
     metric = MeanAveragePrecision(iou_type="segm", class_metrics=True).to(accelerator.device)
 
@@ -352,7 +352,7 @@ def evaluation_loop(model, image_processor, accelerator: Accelerator, dataloader
         # Process predictions for current batch (local GPU only)
         post_processed_output = image_processor.post_process_instance_segmentation(
             outputs,
-            threshold=0.0,
+            threshold=score_threshold,
             target_sizes=current_target_sizes,
             return_binary_maps=True,
         )
@@ -602,6 +602,16 @@ def parse_args():
         type=int,
         default=50,
         help="Log training loss and learning rate every N optimization steps.",
+    )
+    parser.add_argument(
+        "--eval_score_threshold",
+        type=float,
+        default=0.0,
+        help=(
+            "Score threshold applied in post-processing during evaluation. 0.0 keeps every "
+            "query (exact mAP, slow); ~0.05 drops near-zero-score masks to greatly speed up "
+            "the torchmetrics mask-mAP computation with negligible mAP impact."
+        ),
     )
 
     # First pass: pick up --config, then apply the JSON file as defaults so
@@ -975,7 +985,7 @@ def main():
                         model.eval()
                         
                         # 2. 현재 스텝의 성능 메트릭 계산
-                        metrics = evaluation_loop(model, image_processor, accelerator, valid_dataloader)
+                        metrics = evaluation_loop(model, image_processor, accelerator, valid_dataloader, score_threshold=args.eval_score_threshold)
                         logger.info(f"Metrics at step {completed_steps}: {metrics}")
                         
                         # 3. 다시 train 모드로 전환하여 학습 계속
@@ -1037,7 +1047,7 @@ def main():
 
         logger.info("***** Running evaluation *****")
         model.eval()
-        metrics = evaluation_loop(model, image_processor, accelerator, valid_dataloader)
+        metrics = evaluation_loop(model, image_processor, accelerator, valid_dataloader, score_threshold=args.eval_score_threshold)
 
         logger.info(f"epoch {epoch}: {metrics}")
 
@@ -1158,7 +1168,7 @@ def main():
         )
         test_dataloader = accelerator.prepare(test_dataloader)
         model.eval()
-        final_metrics = evaluation_loop(model, image_processor, accelerator, test_dataloader)
+        final_metrics = evaluation_loop(model, image_processor, accelerator, test_dataloader, score_threshold=args.eval_score_threshold)
         final_prefix = "test"
     elif metrics is not None:
         logger.info("No test split found - reporting the last validation metrics as final results.")
@@ -1167,7 +1177,7 @@ def main():
     else:
         logger.info("No test split found - running final evaluation on the validation split.")
         model.eval()
-        final_metrics = evaluation_loop(model, image_processor, accelerator, valid_dataloader)
+        final_metrics = evaluation_loop(model, image_processor, accelerator, valid_dataloader, score_threshold=args.eval_score_threshold)
         final_prefix = "valid"
 
     processed_metrics = {}
